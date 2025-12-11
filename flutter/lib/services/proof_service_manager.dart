@@ -48,9 +48,9 @@ class ProofServiceManager {
           onStart: onBackgroundStart,
           autoStart: false,
           isForegroundMode: true,
-          notificationChannelId: 'zkid_completion',
-          initialNotificationTitle: 'zkID Proof Generation',
-          initialNotificationContent: 'Initializing background service...',
+          notificationChannelId: 'openac_completion',
+          initialNotificationTitle: 'OpenAC',
+          initialNotificationContent: 'Initializing...',
           foregroundServiceNotificationId: 888,
         ),
         iosConfiguration: IosConfiguration(

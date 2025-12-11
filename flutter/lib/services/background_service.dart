@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ui';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:mopro_flutter_bindings/src/rust/third_party/spartan2_hyrax_mopro.dart';
 import 'package:mopro_flutter_bindings/src/rust/frb_generated.dart';
@@ -10,6 +9,7 @@ import 'package:mopro_flutter_bindings/src/rust/frb_generated.dart';
 import 'models/proof_task.dart';
 import 'models/proof_result.dart';
 import 'notification_service.dart';
+import 'state_persistence_service.dart';
 
 /// Entry point for the background service
 /// This function runs in a separate isolate and persists even after app closure
@@ -32,13 +32,22 @@ Future<bool> onBackgroundStart(ServiceInstance service) async {
   // Initialize notification service BEFORE setting up foreground service
   final notificationService = NotificationService();
   await notificationService.initialize();
+  await notificationService.requestPermissions();
+
+  // Initialize state persistence service
+  final stateService = await StatePersistenceService.initialize();
 
   // Set up foreground notification on Android AFTER notification channels are created
   if (service is AndroidServiceInstance) {
+    // Wait a bit to ensure notification channels are fully registered
+    await Future.delayed(const Duration(milliseconds: 200));
+
     service.setAsForegroundService();
-    service.setForegroundNotificationInfo(
-      title: 'zkID Proof Generation',
-      content: 'Background operations in progress',
+
+    // Configure notification to use our created channel
+    await service.setForegroundNotificationInfo(
+      title: 'OpenAC',
+      content: 'Processing cryptographic operations',
     );
   }
 
@@ -73,6 +82,7 @@ Future<bool> onBackgroundStart(ServiceInstance service) async {
           () => isProcessing,
           (value) => isProcessing = value,
           notificationService,
+          stateService,
         ));
       }
     } catch (e) {
@@ -107,6 +117,7 @@ Future<void> _processQueue(
   bool Function() isProcessingGetter,
   void Function(bool) isProcessingSetter,
   NotificationService notificationService,
+  StatePersistenceService stateService,
 ) async {
   isProcessingSetter(true);
 
@@ -116,7 +127,7 @@ Future<void> _processQueue(
 
   while (queue.isNotEmpty) {
     final task = queue.removeFirst();
-    await _executeTask(service, task, notificationService);
+    await _executeTask(service, task, notificationService, stateService);
 
     // Track completed task
     if (task.status == TaskStatus.completed && task.durationMs != null) {
@@ -160,6 +171,7 @@ Future<void> _executeTask(
   ServiceInstance service,
   ProofTask task,
   NotificationService notificationService,
+  StatePersistenceService stateService,
 ) async {
   task.status = TaskStatus.running;
   task.startedAt = DateTime.now();
@@ -198,6 +210,16 @@ Future<void> _executeTask(
       taskType: task.type,
       rustOutput: result,
     );
+
+    // Persist task completion state
+    switch (task.type) {
+      case ProofTaskType.setupPrepare:
+        await stateService.setSetupPrepareCompleted(true);
+      case ProofTaskType.setupShow:
+        await stateService.setSetupShowCompleted(true);
+      case ProofTaskType.provePrepare:
+        await stateService.setPrepareProvingCompleted(true);
+    }
 
     // Send individual task completion notification with detailed timings
     if (task.durationMs != null) {

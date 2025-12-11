@@ -10,6 +10,7 @@ import 'services/proof_service_manager.dart';
 import 'services/models/proof_task.dart';
 import 'services/models/proof_result.dart';
 import 'services/notification_service.dart';
+import 'services/state_persistence_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -89,10 +90,6 @@ Future<void> _copyAssetsToDocuments() async {
   }
 }
 
-/// Note: Background operations now use flutter_background_service
-/// The service runs in a persistent isolate managed by ProofServiceManager
-/// Old compute()-based isolate functions have been removed
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -101,54 +98,63 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0891B2), // Teal accent
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF5F5F5),
+        cardTheme: CardThemeData(
+          elevation: 2,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          color: Colors.white,
+        ),
         useMaterial3: true,
       ),
-      home: const CircuitProverScreen(),
+      home: const OpenACScreen(),
     );
   }
 }
 
-enum CircuitType { prepare, show }
-
-enum OperationPhase { idle, setup, proving, verifying, complete }
-
-class CircuitProverScreen extends StatefulWidget {
-  const CircuitProverScreen({super.key});
-
-  @override
-  State<CircuitProverScreen> createState() => _CircuitProverScreenState();
+// Application state enum
+enum AppState {
+  welcome,          // Initial welcome state - needs to get started
+  initializing,     // Keys being set up
+  ready,            // Ready to receive VC
+  vcReceived,       // Processing VC (prepare proving)
+  proofReady,       // Ready to generate show proof
+  proofGenerated,   // Show proof generated, display metrics
+  error             // Error state
 }
 
-class _CircuitProverScreenState extends State<CircuitProverScreen> {
-  CircuitType _selectedCircuit = CircuitType.prepare;
-  OperationPhase _currentPhase = OperationPhase.idle;
+class OpenACScreen extends StatefulWidget {
+  const OpenACScreen({super.key});
 
-  bool _isOperating = false;
-  bool _isBackgroundOperation = false;
-  String? _fullWorkflowResult;
-  Exception? _error;
+  @override
+  State<OpenACScreen> createState() => _OpenACScreenState();
+}
 
-  // Timing metrics (parsed from result strings)
-  Map<String, int>? _fullWorkflowTimings;
+class _OpenACScreenState extends State<OpenACScreen> {
+  AppState _currentState = AppState.welcome;
+  String? _errorMessage;
+  bool _expandTechnicalDetails = false;
+  int _setupTasksCompleted = 0;
 
-  // Batch operation state
-  bool _isRunningBatch = false;
-  String? _currentBatchTask;
-  Map<String, int> _batchTimings = {};
-  List<String> _completedBatchTasks = [];
-  int _currentBatchTaskIndex = 0;
-  final int _totalBatchTasks = 3;
+  // Proof metrics
+  Map<String, int>? _proofTimings;
+  int? _proofSize;
+  String? _fullResult;
 
   // Background service manager
   final ProofServiceManager _serviceManager = ProofServiceManager();
   bool _serviceInitialized = false;
 
+  // State persistence service
+  StatePersistenceService? _stateService;
+
   @override
   void initState() {
     super.initState();
     _initializeApp();
-    _initializeBackgroundService();
   }
 
   @override
@@ -161,15 +167,52 @@ class _CircuitProverScreenState extends State<CircuitProverScreen> {
     try {
       await initApp();
 
+      // Initialize state persistence service
+      _stateService = await StatePersistenceService.initialize();
+
+      // Restore persisted state
+      await _restorePersistedState();
+
       // Initialize and request notification permissions
       final notificationService = NotificationService();
       await notificationService.initialize();
       await notificationService.requestPermissions();
+
+      // Initialize background service (but don't start key setup yet)
+      await _initializeBackgroundService();
     } catch (e) {
       setState(() {
-        _error = Exception('Initialization failed: $e');
+        _currentState = AppState.error;
+        _errorMessage = 'Initialization failed: $e';
       });
     }
+  }
+
+  Future<void> _restorePersistedState() async {
+    if (_stateService == null) return;
+
+    setState(() {
+      // Restore setup completion state
+      _setupTasksCompleted = _stateService!.setupTasksCompleted;
+
+      // Determine the appropriate app state based on persisted data
+      if (_stateService!.isSetupCompleted) {
+        // Both setup tasks completed
+        if (_stateService!.isPrepareProvingCompleted) {
+          // Prepare proving also completed → ready to generate show proof
+          _currentState = AppState.proofReady;
+        } else {
+          // Just setup completed → ready to receive credentials
+          _currentState = AppState.ready;
+        }
+      } else if (_setupTasksCompleted > 0) {
+        // Partial setup completed → still initializing
+        _currentState = AppState.initializing;
+      }
+      // else: stay in welcome state (default)
+    });
+
+    debugPrint('State restored: $_currentState, setup tasks: $_setupTasksCompleted');
   }
 
   Future<void> _initializeBackgroundService() async {
@@ -186,47 +229,49 @@ class _CircuitProverScreenState extends State<CircuitProverScreen> {
 
       // Set up event listeners for background service
       _serviceManager.onTaskStarted.listen((task) {
-        setState(() {
-          _currentBatchTask = _taskTypeToDisplayName(task.type);
-          _currentBatchTaskIndex = _getTaskIndex(task.type);
-        });
         debugPrint('Task started: ${task.type.name}');
       });
 
       _serviceManager.onTaskCompleted.listen((result) {
-        setState(() {
-          if (result.timings != null) {
-            _batchTimings[_taskTypeToDisplayName(result.taskType)] =
-                result.timings!.totalMs;
-          }
-          _completedBatchTasks.add(_taskTypeToDisplayName(result.taskType));
+        debugPrint('Task completed: ${result.taskType.name}');
 
-          // Check if all tasks are completed
-          if (_completedBatchTasks.length >= _totalBatchTasks) {
-            _isRunningBatch = false;
-            _isOperating = false;
-            _isBackgroundOperation = false;
-            _currentBatchTask = null;
-            _currentPhase = OperationPhase.complete;
+        setState(() {
+          // Track setup completion
+          if (result.taskType == ProofTaskType.setupPrepare ||
+              result.taskType == ProofTaskType.setupShow) {
+            _setupTasksCompleted++;
+
+            // Both setup tasks complete → Ready state
+            if (_setupTasksCompleted >= 2) {
+              _currentState = AppState.ready;
+            }
+          }
+
+          // Prepare proving complete → Proof Ready state
+          if (result.taskType == ProofTaskType.provePrepare) {
+            _currentState = AppState.proofReady;
+            // Store timings for technical details
+            if (result.timings != null) {
+              _proofTimings = {
+                'prepare': result.timings!.totalMs,
+              };
+            }
           }
         });
-        debugPrint('Task completed: ${result.taskType.name} - ${result.timings}');
       });
 
       _serviceManager.onTaskFailed.listen((result) {
         setState(() {
-          _error = Exception('${_taskTypeToDisplayName(result.taskType)} failed: ${result.error}');
-          _isRunningBatch = false;
-          _isOperating = false;
-          _isBackgroundOperation = false;
-          _currentBatchTask = null;
+          _currentState = AppState.error;
+          _errorMessage = 'Task failed: ${result.error}';
         });
         debugPrint('Task failed: ${result.taskType.name} - ${result.error}');
       });
 
       _serviceManager.onServiceError.listen((error) {
         setState(() {
-          _error = Exception('Service error: $error');
+          _currentState = AppState.error;
+          _errorMessage = 'Service error: $error';
         });
         debugPrint('Service error: $error');
       });
@@ -234,24 +279,125 @@ class _CircuitProverScreenState extends State<CircuitProverScreen> {
       debugPrint('Error initializing background service: $e');
       setState(() {
         _serviceInitialized = false;
+        _currentState = AppState.error;
+        _errorMessage = 'Failed to initialize background service: $e';
       });
     }
   }
 
-  String _taskTypeToDisplayName(ProofTaskType type) {
-    return switch (type) {
-      ProofTaskType.setupPrepare => 'Setup Prepare Keys',
-      ProofTaskType.setupShow => 'Setup Show Keys',
-      ProofTaskType.provePrepare => 'Prove Prepare Circuit',
-    };
+  Future<void> _onGetStarted() async {
+    if (!_serviceInitialized) {
+      setState(() {
+        _currentState = AppState.error;
+        _errorMessage = 'Background service not initialized';
+      });
+      return;
+    }
+
+    setState(() {
+      _currentState = AppState.initializing;
+    });
+
+    try {
+      final documentsPath = await _getDocumentsPath();
+
+      // Submit setup tasks sequentially
+      await _serviceManager.submitTask(
+        type: ProofTaskType.setupPrepare,
+        documentsPath: documentsPath,
+      );
+
+      await _serviceManager.submitTask(
+        type: ProofTaskType.setupShow,
+        documentsPath: documentsPath,
+      );
+
+      debugPrint('Key setup tasks submitted to background service');
+    } catch (e) {
+      setState(() {
+        _currentState = AppState.error;
+        _errorMessage = 'Failed to start key setup: $e';
+      });
+    }
   }
 
-  int _getTaskIndex(ProofTaskType type) {
-    return switch (type) {
-      ProofTaskType.setupPrepare => 0,
-      ProofTaskType.setupShow => 1,
-      ProofTaskType.provePrepare => 2,
-    };
+  Future<void> _onReceiveCredential() async {
+    if (!_serviceInitialized) return;
+
+    setState(() {
+      _currentState = AppState.vcReceived;
+    });
+
+    try {
+      final documentsPath = await _getDocumentsPath();
+
+      // Submit prepare proving task
+      await _serviceManager.submitTask(
+        type: ProofTaskType.provePrepare,
+        documentsPath: documentsPath,
+      );
+
+      debugPrint('Prepare proving task submitted');
+    } catch (e) {
+      setState(() {
+        _currentState = AppState.error;
+        _errorMessage = 'Failed to process credential: $e';
+      });
+    }
+  }
+
+  Future<void> _onGenerateProof() async {
+    setState(() {
+      _currentState = AppState.initializing; // Show progress
+    });
+
+    try {
+      final documentsPath = await _getDocumentsPath();
+
+      // Run show circuit proving (fast, synchronous)
+      final result = await proveShowCircuit(documentsPath: documentsPath);
+
+      // Parse timings and proof size
+      final timings = _parseDetailedTimings(result);
+
+      setState(() {
+        _currentState = AppState.proofGenerated;
+        _fullResult = result;
+        _proofTimings = timings;
+        _proofSize = timings?['proofSize'];
+        _expandTechnicalDetails = true; // Auto-expand on success
+      });
+    } catch (e) {
+      setState(() {
+        _currentState = AppState.error;
+        _errorMessage = 'Failed to generate proof: $e';
+      });
+    }
+  }
+
+  Future<void> _onStartOver() async {
+    // Reset prepare proving state but keep setup state
+    await _stateService?.resetPrepareProvingState();
+
+    setState(() {
+      _currentState = AppState.ready;
+      _errorMessage = null;
+      _proofTimings = null;
+      _proofSize = null;
+      _fullResult = null;
+      _expandTechnicalDetails = false;
+    });
+  }
+
+  Future<void> _onRetry() async {
+    // Reset all persisted state on retry
+    await _stateService?.resetAll();
+
+    setState(() {
+      _currentState = AppState.welcome;
+      _errorMessage = null;
+      _setupTasksCompleted = 0;
+    });
   }
 
   Future<String> _getDocumentsPath() async {
@@ -260,9 +406,6 @@ class _CircuitProverScreenState extends State<CircuitProverScreen> {
   }
 
   Map<String, int>? _parseDetailedTimings(String result) {
-    // Parse detailed timing format:
-    // "circuit completed | Setup: 92ms | Prep: 2ms | Prove: 89ms | Verify: 11ms | Total: 194ms"
-    // or "proof completed | Prep: 2ms | Prove: 89ms | Total: 91ms"
     final Map<String, int> timings = {};
 
     final setupMatch = RegExp(r'Setup: (\d+)ms').firstMatch(result);
@@ -298,347 +441,338 @@ class _CircuitProverScreenState extends State<CircuitProverScreen> {
     return timings.isNotEmpty ? timings : null;
   }
 
-  Future<void> _runProveShow() async {
-    setState(() {
-      _isOperating = true;
-      _currentPhase = OperationPhase.proving;
-      _error = null;
-    });
-
-    try {
-      final documentsPath = await _getDocumentsPath();
-
-      // Show circuit runs synchronously (fast, small circuit)
-      final result = await proveShowCircuit(documentsPath: documentsPath);
-
-      setState(() {
-        _currentPhase = OperationPhase.verifying;
-      });
-
-      // Simulate verification phase (already done in Rust)
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      setState(() {
-        _fullWorkflowResult = result;
-        _fullWorkflowTimings = _parseDetailedTimings(result);
-        _currentPhase = OperationPhase.complete;
-      });
-    } catch (e) {
-      setState(() {
-        _error = Exception('Proving failed: $e');
-        _currentPhase = OperationPhase.idle;
-      });
-    } finally {
-      setState(() {
-        _isOperating = false;
-      });
-    }
-  }
-
-  Future<void> _runFullWorkflow() async {
-    setState(() {
-      _isOperating = true;
-      _currentPhase = OperationPhase.setup;
-      _error = null;
-      _fullWorkflowResult = null;
-      _fullWorkflowTimings = null;
-    });
-
-    try {
-      final documentsPath = await _getDocumentsPath();
-
-      // Update phase to proving
-      setState(() {
-        _currentPhase = OperationPhase.proving;
-      });
-
-      final result = _selectedCircuit == CircuitType.prepare
-          ? await runPrepareCircuit(documentsPath: documentsPath)
-          : await runShowCircuit(documentsPath: documentsPath);
-
-      // Update phase to verifying
-      setState(() {
-        _currentPhase = OperationPhase.verifying;
-      });
-
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      setState(() {
-        _fullWorkflowResult = result;
-        _fullWorkflowTimings = _parseDetailedTimings(result);
-        _currentPhase = OperationPhase.complete;
-      });
-    } catch (e) {
-      setState(() {
-        _error = Exception('Full workflow failed: $e');
-        _currentPhase = OperationPhase.idle;
-      });
-    } finally {
-      setState(() {
-        _isOperating = false;
-      });
-    }
-  }
-
-  Future<void> _runAllBackgroundOperations() async {
-    if (!_serviceInitialized) {
-      setState(() {
-        _error = Exception('Background service not initialized');
-      });
-      return;
-    }
-
-    setState(() {
-      _isRunningBatch = true;
-      _isOperating = true;
-      _isBackgroundOperation = true;
-      _error = null;
-      _batchTimings = {};
-      _completedBatchTasks = [];
-      _currentBatchTaskIndex = 0;
-      _currentPhase = OperationPhase.setup;
-    });
-
-    try {
-      final documentsPath = await _getDocumentsPath();
-
-      // Submit all tasks to the background service
-      // The service will execute them sequentially and send progress updates
-      await _serviceManager.submitTask(
-        type: ProofTaskType.setupPrepare,
-        documentsPath: documentsPath,
-      );
-
-      await _serviceManager.submitTask(
-        type: ProofTaskType.setupShow,
-        documentsPath: documentsPath,
-      );
-
-      await _serviceManager.submitTask(
-        type: ProofTaskType.provePrepare,
-        documentsPath: documentsPath,
-      );
-
-      debugPrint('All tasks submitted to background service');
-
-      // Tasks will be executed in background, and UI updates will come
-      // through the stream listeners set up in _initializeBackgroundService
-    } catch (e) {
-      setState(() {
-        _error = Exception('Failed to submit tasks: $e');
-        _isRunningBatch = false;
-        _isOperating = false;
-        _isBackgroundOperation = false;
-      });
-    }
-  }
-
-  void _reset() {
-    setState(() {
-      _currentPhase = OperationPhase.idle;
-      _fullWorkflowResult = null;
-      _error = null;
-      _fullWorkflowTimings = null;
-      _isBackgroundOperation = false;
-      // Reset batch operation state
-      _isRunningBatch = false;
-      _currentBatchTask = null;
-      _batchTimings = {};
-      _completedBatchTasks = [];
-      _currentBatchTaskIndex = 0;
-    });
-  }
-
-  Widget _buildPhaseIndicator(OperationPhase phase, String label, IconData icon) {
-    final isActive = _currentPhase == phase;
-    final isComplete = _currentPhase.index > phase.index && _currentPhase != OperationPhase.idle;
-
-    Color color;
-    if (isActive) {
-      color = Colors.blue;
-    } else if (isComplete) {
-      color = Colors.green;
-    } else {
-      color = Colors.grey;
-    }
-
-    return Column(
-      children: [
-        Icon(
-          isComplete ? Icons.check_circle : icon,
-          color: color,
-          size: 32,
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F5),
+      appBar: AppBar(
+        title: const Text(
+          'OpenAC',
+          style: TextStyle(fontWeight: FontWeight.w600),
         ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: TextStyle(
-            color: color,
-            fontSize: 12,
-            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPhaseTracker() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
+        centerTitle: true,
+        elevation: 0,
+        backgroundColor: Colors.white,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildPhaseIndicator(OperationPhase.setup, 'Setup', Icons.settings),
-            const Icon(Icons.arrow_forward, color: Colors.grey),
-            _buildPhaseIndicator(OperationPhase.proving, 'Prove', Icons.calculate),
-            const Icon(Icons.arrow_forward, color: Colors.grey),
-            _buildPhaseIndicator(OperationPhase.verifying, 'Verify', Icons.verified),
-            const Icon(Icons.arrow_forward, color: Colors.grey),
-            _buildPhaseIndicator(OperationPhase.complete, 'Done', Icons.done_all),
+            _buildStatusCard(),
+            const SizedBox(height: 16),
+            _buildActionCard(),
+            const SizedBox(height: 16),
+            _buildTechnicalDetails(),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildOperationCard({
-    required String title,
-    required String description,
-    required IconData icon,
-    required VoidCallback? onPressed,
-    String? result,
-    int? timeMs,
-    Map<String, int>? detailedTimings,
-    bool isPrimary = false,
-  }) {
+  Widget _buildStatusCard() {
+    final (icon, title, subtitle, showProgress, color) = _getStatusInfo();
+
     return Card(
-      elevation: isPrimary ? 4 : 2,
-      color: isPrimary ? Colors.blue.shade50 : null,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(24.0),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(icon, color: isPrimary ? Colors.blue : Colors.grey),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: isPrimary ? Colors.blue.shade900 : null,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        description,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                    ],
-                  ),
+            if (showProgress)
+              SizedBox(
+                width: 64,
+                height: 64,
+                child: CircularProgressIndicator(
+                  strokeWidth: 4,
+                  color: color,
                 ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _isOperating ? null : onPressed,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isPrimary ? Colors.blue : null,
-                  foregroundColor: isPrimary ? Colors.white : null,
-                ),
-                child: Text(title),
+              )
+            else
+              Icon(
+                icon,
+                size: 64,
+                color: color,
               ),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF1F2937),
+              ),
+              textAlign: TextAlign.center,
             ),
-            if (result != null) ...[
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(8.0),
-                decoration: BoxDecoration(
-                  color: Colors.green.shade50,
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: Colors.green.shade200),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.check_circle, color: Colors.green.shade700, size: 16),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(
-                            result.split('|').first.trim(),
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.green.shade900,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (detailedTimings != null) ...[
-                      const SizedBox(height: 8),
-                      const Divider(),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Timing Breakdown:',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey.shade800,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      if (detailedTimings.containsKey('setup'))
-                        _buildTimingRow('Setup', detailedTimings['setup']!),
-                      if (detailedTimings.containsKey('prep'))
-                        _buildTimingRow('Preparation', detailedTimings['prep']!),
-                      if (detailedTimings.containsKey('prove'))
-                        _buildTimingRow('Proving', detailedTimings['prove']!),
-                      if (detailedTimings.containsKey('verify'))
-                        _buildTimingRow('Verification', detailedTimings['verify']!),
-                      if (detailedTimings.containsKey('proofSize')) ...[
-                        const SizedBox(height: 4),
-                        const Divider(),
-                        _buildProofSizeRow(detailedTimings['proofSize']!),
-                      ],
-                      if (detailedTimings.containsKey('total')) ...[
-                        const SizedBox(height: 4),
-                        const Divider(),
-                        _buildTimingRow(
-                          'Total',
-                          detailedTimings['total']!,
-                          bold: true,
-                        ),
-                      ],
-                    ] else if (timeMs != null) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        'Execution time: ${timeMs}ms (${(timeMs / 1000).toStringAsFixed(2)}s)',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey.shade700,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
+            const SizedBox(height: 8),
+            Text(
+              subtitle,
+              style: TextStyle(
+                fontSize: 14,
+                color: const Color(0xFF6B7280),
+              ),
+              textAlign: TextAlign.center,
+            ),
+
+            // Show proof metrics prominently when generated
+            if (_currentState == AppState.proofGenerated && _proofTimings != null) ...[
+              const SizedBox(height: 20),
+              const Divider(),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _buildMetricColumn(
+                    'Proof Size',
+                    _proofSize != null
+                        ? '${(_proofSize! / 1024).toStringAsFixed(2)} KB'
+                        : 'N/A',
+                  ),
+                  _buildMetricColumn(
+                    'Proving Time',
+                    _proofTimings!['prove'] != null
+                        ? '${(_proofTimings!['prove']! / 1000).toStringAsFixed(2)}s'
+                        : 'N/A',
+                  ),
+                ],
               ),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMetricColumn(String label, String value) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF0891B2),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 12,
+            color: Color(0xFF6B7280),
+          ),
+        ),
+      ],
+    );
+  }
+
+  (IconData, String, String, bool, Color) _getStatusInfo() {
+    switch (_currentState) {
+      case AppState.welcome:
+        return (
+          Icons.wb_sunny_outlined,
+          'Welcome to OpenAC',
+          'Anonymous Credentials made simple',
+          false,
+          const Color(0xFF0891B2),
+        );
+
+      case AppState.initializing:
+        return (
+          Icons.hourglass_empty,
+          'System Initializing',
+          'Setting up cryptographic keys...',
+          true,
+          const Color(0xFF0891B2),
+        );
+
+      case AppState.ready:
+        return (
+          Icons.check_circle,
+          'System Ready',
+          'Ready to receive credentials',
+          false,
+          const Color(0xFF10B981),
+        );
+
+      case AppState.vcReceived:
+        return (
+          Icons.hourglass_empty,
+          'Credential Received',
+          'Preparing proof...',
+          true,
+          const Color(0xFF0891B2),
+        );
+
+      case AppState.proofReady:
+        return (
+          Icons.shield_outlined,
+          'Proof Ready',
+          'Credential verified, ready to present',
+          false,
+          const Color(0xFF10B981),
+        );
+
+      case AppState.proofGenerated:
+        return (
+          Icons.verified,
+          'Proof Generated Successfully',
+          'Proof is ready to be shared with verifier',
+          false,
+          const Color(0xFF10B981),
+        );
+
+      case AppState.error:
+        return (
+          Icons.error_outline,
+          'Error',
+          _errorMessage ?? 'An error occurred',
+          false,
+          const Color(0xFFEF4444),
+        );
+    }
+  }
+
+  Widget _buildActionCard() {
+    final (buttonText, onPressed, isEnabled) = _getActionInfo();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            onPressed: isEnabled ? onPressed : null,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0891B2),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+              elevation: isEnabled ? 2 : 0,
+            ),
+            child: Text(
+              buttonText,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  (String, VoidCallback?, bool) _getActionInfo() {
+    switch (_currentState) {
+      case AppState.welcome:
+        return ('Get Started', _onGetStarted, true);
+
+      case AppState.initializing:
+        return ('Please Wait...', null, false);
+
+      case AppState.ready:
+        return ('Receive Credential', _onReceiveCredential, true);
+
+      case AppState.vcReceived:
+        return ('Processing...', null, false);
+
+      case AppState.proofReady:
+        return ('Generate Proof for Verifier', _onGenerateProof, true);
+
+      case AppState.proofGenerated:
+        return ('Start Over', _onStartOver, true);
+
+      case AppState.error:
+        return ('Retry', _onRetry, true);
+    }
+  }
+
+  Widget _buildTechnicalDetails() {
+    // Don't show if no data yet
+    if (_proofTimings == null && _fullResult == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Card(
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          title: const Text(
+            'Technical Details',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+          initiallyExpanded: _expandTechnicalDetails,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_proofTimings != null) ...[
+                    const Text(
+                      'Timing Breakdown:',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF6B7280),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    if (_proofTimings!.containsKey('setup'))
+                      _buildTimingRow('Setup', _proofTimings!['setup']!),
+                    if (_proofTimings!.containsKey('prep'))
+                      _buildTimingRow('Preparation', _proofTimings!['prep']!),
+                    if (_proofTimings!.containsKey('prove'))
+                      _buildTimingRow('Proving', _proofTimings!['prove']!),
+                    if (_proofTimings!.containsKey('verify'))
+                      _buildTimingRow('Verification', _proofTimings!['verify']!),
+                    if (_proofTimings!.containsKey('total')) ...[
+                      const SizedBox(height: 8),
+                      const Divider(),
+                      const SizedBox(height: 8),
+                      _buildTimingRow('Total', _proofTimings!['total']!, bold: true),
+                    ],
+                    if (_proofTimings!.containsKey('prepare')) ...[
+                      _buildTimingRow('Prepare Proving', _proofTimings!['prepare']!),
+                    ],
+                  ],
+                  if (_fullResult != null) ...[
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Raw Output:',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF6B7280),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF9FAFB),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFFE5E7EB)),
+                      ),
+                      child: Text(
+                        _fullResult!,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          color: Color(0xFF374151),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -647,483 +781,28 @@ class _CircuitProverScreenState extends State<CircuitProverScreen> {
 
   Widget _buildTimingRow(String label, int ms, {bool bold = false}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2.0),
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(
             label,
             style: TextStyle(
-              fontSize: 11,
-              color: Colors.grey.shade700,
+              fontSize: 12,
+              color: const Color(0xFF6B7280),
               fontWeight: bold ? FontWeight.bold : FontWeight.normal,
             ),
           ),
           Text(
             '${ms}ms (${(ms / 1000).toStringAsFixed(2)}s)',
             style: TextStyle(
-              fontSize: 11,
-              color: Colors.grey.shade900,
+              fontSize: 12,
+              color: const Color(0xFF1F2937),
               fontWeight: bold ? FontWeight.bold : FontWeight.w600,
             ),
           ),
         ],
       ),
     );
-  }
-
-  Widget _buildProofSizeRow(int bytes) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2.0),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            'Proof Size',
-            style: TextStyle(
-              fontSize: 11,
-              color: Colors.grey.shade700,
-              fontWeight: FontWeight.normal,
-            ),
-          ),
-          Text(
-            '${(bytes / 1024).toStringAsFixed(2)} KB ($bytes bytes)',
-            style: TextStyle(
-              fontSize: 11,
-              color: Colors.grey.shade900,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBatchResultsCard() {
-    if (_batchTimings.isEmpty && !_isRunningBatch) {
-      return const SizedBox.shrink();
-    }
-
-    final totalTime = _batchTimings.values.fold<int>(0, (sum, time) => sum + time);
-
-    return Card(
-      color: _isRunningBatch ? Colors.blue.shade50 : Colors.green.shade50,
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  _isRunningBatch ? Icons.hourglass_empty : Icons.check_circle,
-                  color: _isRunningBatch ? Colors.blue.shade700 : Colors.green.shade700,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  _isRunningBatch ? 'Batch Operation Running' : 'Batch Operation Complete',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: _isRunningBatch ? Colors.blue.shade900 : Colors.green.shade900,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            const Divider(),
-            const SizedBox(height: 8),
-
-            // Task list
-            ..._buildBatchTaskList(),
-
-            const SizedBox(height: 8),
-            const Divider(),
-            const SizedBox(height: 8),
-
-            // Total time
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  _isRunningBatch ? 'Elapsed Time' : 'Total Time',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey.shade800,
-                  ),
-                ),
-                Text(
-                  '${totalTime}ms (${(totalTime / 1000).toStringAsFixed(2)}s)',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: _isRunningBatch ? Colors.blue.shade900 : Colors.green.shade900,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  List<Widget> _buildBatchTaskList() {
-    final tasks = ['Setup Prepare Keys', 'Setup Show Keys', 'Prove Prepare Circuit'];
-    final List<Widget> taskWidgets = [];
-
-    for (int i = 0; i < tasks.length; i++) {
-      final taskName = tasks[i];
-      final isCompleted = _completedBatchTasks.contains(taskName);
-      final isRunning = _isRunningBatch && _currentBatchTask == taskName;
-      final timeMs = _batchTimings[taskName];
-
-      IconData icon;
-      Color iconColor;
-      String statusText;
-
-      if (isCompleted) {
-        icon = Icons.check_circle;
-        iconColor = Colors.green.shade700;
-        statusText = '${timeMs}ms (${(timeMs! / 1000).toStringAsFixed(2)}s)';
-      } else if (isRunning) {
-        icon = Icons.hourglass_empty;
-        iconColor = Colors.blue.shade700;
-        statusText = 'Running...';
-      } else {
-        icon = Icons.pending;
-        iconColor = Colors.grey.shade400;
-        statusText = 'Pending';
-      }
-
-      taskWidgets.add(
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4.0),
-          child: Row(
-            children: [
-              Icon(icon, size: 16, color: iconColor),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  taskName,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade800,
-                    fontWeight: isRunning ? FontWeight.bold : FontWeight.normal,
-                  ),
-                ),
-              ),
-              Text(
-                statusText,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: isCompleted ? Colors.green.shade900 : Colors.grey.shade600,
-                  fontWeight: isCompleted ? FontWeight.w600 : FontWeight.normal,
-                  fontStyle: isRunning ? FontStyle.italic : FontStyle.normal,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return taskWidgets;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Spartan2-Hyrax Circuits'),
-        elevation: 2,
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Circuit Selector
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Select Circuit',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SegmentedButton<CircuitType>(
-                      segments: const [
-                        ButtonSegment(
-                          value: CircuitType.prepare,
-                          label: Text('Prepare Circuit'),
-                          icon: Icon(Icons.key),
-                        ),
-                        ButtonSegment(
-                          value: CircuitType.show,
-                          label: Text('Show Circuit'),
-                          icon: Icon(Icons.visibility),
-                        ),
-                      ],
-                      selected: {_selectedCircuit},
-                      onSelectionChanged: _isOperating
-                          ? null
-                          : (Set<CircuitType> newSelection) {
-                              setState(() {
-                                _selectedCircuit = newSelection.first;
-                                _reset();
-                              });
-                            },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 16),
-
-            // Phase Tracker
-            if (_currentPhase != OperationPhase.idle)
-              _buildPhaseTracker(),
-
-            const SizedBox(height: 16),
-
-            // Progress Indicator
-            if (_isOperating)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 12),
-                      Text(
-                        _getCurrentPhaseText(),
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      if (_isRunningBatch && _currentBatchTask != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          'Executing: $_currentBatchTask',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Colors.blue.shade700,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Task ${_currentBatchTaskIndex + 1} of $_totalBatchTasks',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade600,
-                          ),
-                        ),
-                      ],
-                      if (_isBackgroundOperation) ...[
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.cloud_queue,
-                              size: 16,
-                              color: Colors.purple.shade700,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              _isRunningBatch ? 'Running batch in background' : 'Running in background',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.purple.shade700,
-                                fontStyle: FontStyle.italic,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-
-            // Error Display
-            if (_error != null)
-              Card(
-                color: Colors.red.shade50,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(Icons.error, color: Colors.red.shade700),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'Error',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _error.toString(),
-                        style: TextStyle(color: Colors.red.shade900),
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          TextButton(
-                            onPressed: _reset,
-                            child: const Text('Dismiss'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-            const SizedBox(height: 16),
-
-            // Batch Operation Card
-            Card(
-              elevation: 3,
-              color: Colors.purple.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.playlist_play, color: Colors.purple.shade700, size: 28),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Run All Background Operations',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.purple.shade900,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'Execute all three operations sequentially: Setup Prepare, Setup Show, Prove Prepare',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey.shade600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isOperating ? null : _runAllBackgroundOperations,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.purple.shade700,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        icon: const Icon(Icons.cloud_queue),
-                        label: const Text('Run All Background Tasks'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 12),
-
-            // Batch Results Display
-            _buildBatchResultsCard(),
-
-            if (_batchTimings.isNotEmpty || _isRunningBatch)
-              const SizedBox(height: 16),
-
-            // Operation Cards
-            if (_selectedCircuit == CircuitType.show) ...[
-              _buildOperationCard(
-                title: 'Generate Proof (Show Circuit)',
-                description: 'Generate proof for Show circuit using existing keys (runs synchronously, fast)',
-                icon: Icons.calculate,
-                onPressed: _runProveShow,
-                result: _fullWorkflowResult,
-                detailedTimings: _fullWorkflowTimings,
-              ),
-              const SizedBox(height: 12),
-            ],
-
-            _buildOperationCard(
-              title: 'Run Full Workflow',
-              description: 'Execute complete setup + prove + verify pipeline (synchronous, for testing)',
-              icon: Icons.play_circle,
-              onPressed: _runFullWorkflow,
-              result: _fullWorkflowResult,
-              detailedTimings: _fullWorkflowTimings,
-              isPrimary: true,
-            ),
-
-            const SizedBox(height: 16),
-
-            // Reset Button
-            if (_currentPhase != OperationPhase.idle && !_isOperating)
-              OutlinedButton.icon(
-                onPressed: _reset,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Reset'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.all(16),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _getCurrentPhaseText() {
-    if (_isRunningBatch) {
-      return 'Running Batch Operations';
-    }
-
-    switch (_currentPhase) {
-      case OperationPhase.setup:
-        return 'Setting up circuit keys...';
-      case OperationPhase.proving:
-        return 'Generating proof...';
-      case OperationPhase.verifying:
-        return 'Verifying proof...';
-      case OperationPhase.complete:
-        return 'Operation complete';
-      default:
-        return 'Processing...';
-    }
   }
 }

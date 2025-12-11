@@ -54,8 +54,8 @@ class NotificationService {
   Future<void> _createNotificationChannels() async {
     // Channel for completion notifications
     const completionChannel = AndroidNotificationChannel(
-      'zkid_completion',
-      'Proof Generation Complete',
+      'openac_completion',
+      'OpenAC Proof Generation',
       description: 'Notifications when proof generation operations complete',
       importance: Importance.high,
       playSound: true,
@@ -114,8 +114,8 @@ class NotificationService {
 
       // Android notification details
       const androidDetails = AndroidNotificationDetails(
-        'zkid_completion',
-        'Proof Generation Complete',
+        'openac_completion',
+        'OpenAC Proof Generation',
         channelDescription: 'Notifications when proof generation operations complete',
         importance: Importance.high,
         priority: Priority.high,
@@ -168,8 +168,8 @@ class NotificationService {
 
       // Android notification details
       const androidDetails = AndroidNotificationDetails(
-        'zkid_completion',
-        'Proof Generation Complete',
+        'openac_completion',
+        'OpenAC Proof Generation',
         channelDescription: 'Notifications when proof generation operations complete',
         importance: Importance.high,
         priority: Priority.high,
