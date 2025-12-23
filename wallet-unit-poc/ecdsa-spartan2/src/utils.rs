@@ -1,7 +1,7 @@
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use bellpepper_core::SynthesisError;
-use rust_witness::BigInt;
+use num_bigint::BigInt;
 use serde_json::Value;
 use std::{collections::HashMap, ops::Range, str::FromStr};
 
@@ -117,6 +117,141 @@ pub fn convert_bigint_to_scalar(
     bigint_witness: Vec<BigInt>,
 ) -> Result<Vec<Scalar>, SynthesisError> {
     bigint_witness.into_iter().map(bigint_to_scalar).collect()
+}
+
+/// Parses the Circom witness binary format (.wtns) directly to Scalar vector
+pub fn parse_witness(
+    witness_bytes: &[u8],
+) -> Result<Vec<Scalar>, SynthesisError> {
+    let mut pos = 0;
+
+    // Validate .wtns header (4 bytes magic)
+    if witness_bytes.len() < 12 || &witness_bytes[0..4] != b"wtns" {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    pos += 4;
+
+    // Skip version (4 bytes)
+    pos += 4;
+
+    // Read number of sections (4 bytes)
+    let n_sections = u32::from_le_bytes(witness_bytes[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+
+    // Number of bytes per field element (from section 1)
+    let mut n8 = 0;
+
+    // Iterate through sections to find witness data (section_id = 2)
+    for _ in 0..n_sections {
+        if pos + 12 > witness_bytes.len() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+
+        let section_id = u32::from_le_bytes(witness_bytes[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+
+        let section_length =
+            u64::from_le_bytes(witness_bytes[pos..pos + 8].try_into().unwrap()) as usize;
+        pos += 8;
+
+        match section_id {
+            // Section 1: Header metadata
+            // Contains n8 (4 bytes), field q (32 bytes), n_witness_values (4 bytes)
+            1 => {
+                if pos + 4 > witness_bytes.len() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                n8 = u32::from_le_bytes(witness_bytes[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += section_length; // Skip entire section
+            }
+
+            // Section 2: Witness data
+            // Contains witness elements (n8 bytes each)
+            2 => {
+                if n8 == 0 {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+
+                if pos + section_length > witness_bytes.len() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+
+                // Parse witness elements directly to Scalar
+                let witness_data = &witness_bytes[pos..pos + section_length];
+                let num_elements = section_length / n8;
+
+                let mut scalars = Vec::with_capacity(num_elements);
+
+                for chunk in witness_data.chunks(n8) {
+                    // Pad to 32 bytes if needed (n8 might be less than 32)
+                    let mut padded = [0u8; 32];
+                    padded[..chunk.len()].copy_from_slice(chunk);
+
+                    // Convert to Scalar
+                    let scalar = Scalar::from_bytes(&padded)
+                        .into_option()
+                        .ok_or(SynthesisError::Unsatisfiable)?;
+                    scalars.push(scalar);
+                }
+
+                return Ok(scalars);
+            }
+
+            // Skip any other section
+            _ => {
+                pos += section_length;
+            }
+        }
+    }
+
+    Err(SynthesisError::Unsatisfiable)
+}
+
+/// Convert HashMap<String, Vec<BigInt>> to JSON string for witnesscalc_adapter
+/// Reconstructs 2D arrays for fields that were flattened during parsing
+pub fn hashmap_to_json_string(
+    inputs: &HashMap<String, Vec<BigInt>>,
+) -> Result<String, SynthesisError> {
+    use serde_json::json;
+
+    let mut json_map = serde_json::Map::new();
+
+    // Define 2D array fields and their dimensions (rows, cols)
+    let two_d_fields: HashMap<&str, (usize, usize)> = [
+        ("claims", (4, 128)),
+        ("matchSubstring", (4, 50)),
+    ].iter().cloned().collect();
+
+    for (key, values) in inputs.iter() {
+        // Check if this is a 2D array field
+        if let Some(&(rows, cols)) = two_d_fields.get(key.as_str()) {
+            // Reconstruct 2D array from flattened 1D array
+            let mut array_2d = Vec::with_capacity(rows);
+            for i in 0..rows {
+                let start = i * cols;
+                let end = start + cols;
+                if end <= values.len() {
+                    let row: Vec<String> = values[start..end]
+                        .iter()
+                        .map(|bigint| bigint.to_string())
+                        .collect();
+                    array_2d.push(json!(row));
+                } else {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+            }
+            json_map.insert(key.clone(), json!(array_2d));
+        } else {
+            // Regular 1D array
+            let string_array: Vec<String> = values
+                .iter()
+                .map(|bigint| bigint.to_string())
+                .collect();
+            json_map.insert(key.clone(), json!(string_array));
+        }
+    }
+
+    serde_json::to_string(&json_map).map_err(|_| SynthesisError::Unsatisfiable)
 }
 
 #[derive(Debug, Clone)]

@@ -9,7 +9,7 @@ use serde_json::Value;
 use spartan2::traits::circuit::SpartanCircuit;
 use std::{any::type_name, env::current_dir, fs::File, path::PathBuf};
 
-rust_witness::witness!(jwt);
+witnesscalc_adapter::witness!(jwt);
 
 // jwt.circom
 #[derive(Debug, Clone, Default)]

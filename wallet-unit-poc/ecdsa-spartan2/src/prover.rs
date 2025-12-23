@@ -6,7 +6,7 @@ use crate::{
         load_instance, load_proof, load_proving_key, load_shared_blinds, load_verifying_key,
         load_witness, save_instance, save_proof, save_shared_blinds, save_witness,
     },
-    utils::{convert_bigint_to_scalar, parse_jwt_inputs},
+    utils::{hashmap_to_json_string, parse_jwt_inputs, parse_witness},
     Scalar, E,
 };
 
@@ -298,12 +298,20 @@ pub fn generate_prepare_witness(
     // Parse inputs using declarative field definitions
     let inputs = parse_jwt_inputs(&json_value)?;
 
-    // Generate witness using native Rust (rust-witness)
-    info!("Generating witness using native Rust (rust-witness)...");
+    // Generate witness using witnesscalc
+    info!("Generating witness using witnesscalc...");
     let t0 = Instant::now();
-    let witness_bigint = jwt_witness(inputs);
-    info!("rust-witness time: {} ms", t0.elapsed().as_millis());
 
-    let witness: Vec<Scalar> = convert_bigint_to_scalar(witness_bigint)?;
+    let inputs_json = hashmap_to_json_string(&inputs)?;
+
+    // Generate raw witness bytes
+    let witness_bytes = jwt_witness(&inputs_json)
+        .map_err(|_| SynthesisError::Unsatisfiable)?;
+
+    info!("witnesscalc time: {} ms", t0.elapsed().as_millis());
+
+    // Parse witness bytes directly to Scalar
+    let witness = parse_witness(&witness_bytes)?;
+
     Ok(witness)
 }

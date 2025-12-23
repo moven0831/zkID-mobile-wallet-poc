@@ -3,10 +3,10 @@ use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circom_scotia::{reader::load_r1cs, synthesize};
 use serde_json::Value;
 use spartan2::traits::circuit::SpartanCircuit;
-use std::{any::type_name, env::current_dir, fs::File, path::PathBuf};
+use std::{any::type_name, env::current_dir, fs::File, path::PathBuf, time::Instant};
 use tracing::info;
 
-rust_witness::witness!(show);
+witnesscalc_adapter::witness!(show);
 
 // show.circom
 #[derive(Debug, Clone, Default)]
@@ -79,9 +79,20 @@ impl SpartanCircuit<E> for ShowCircuit {
             return Ok(());
         }
 
-        // Generate witness using native Rust (rust-witness)
-        let witness_bigint = show_witness(inputs);
-        let witness: Vec<Scalar> = convert_bigint_to_scalar(witness_bigint)?;
+        // Generate witness using witnesscalc
+        info!("Generating witness using witnesscalc...");
+        let t0 = Instant::now();
+
+        let inputs_json = hashmap_to_json_string(&inputs)?;
+
+        // Generate raw witness bytes
+        let witness_bytes = show_witness(&inputs_json)
+            .map_err(|_| SynthesisError::Unsatisfiable)?;
+
+        info!("witnesscalc time: {} ms", t0.elapsed().as_millis());
+
+        // Parse witness bytes directly to Scalar
+        let witness = parse_witness(&witness_bytes)?;
 
         let r1cs = load_r1cs(r1cs);
         synthesize(cs, r1cs, Some(witness))?;
