@@ -40,5 +40,24 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # Add PATH for Rust build scripts to find C++ compiler and build tools
+    # This is required for witnesscalc-adapter to compile C++ witness calculator code
+    target.build_configurations.each do |config|
+      # Set a consistent iOS deployment target to avoid conflicts
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+
+      # Preserve existing PATH and add common tool locations
+      config.build_settings['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/opt/make/libexec/gnubin'
+
+      # For GMP configure to work, we need to NOT set CC/CPP in Xcode build settings
+      # as they interfere with autoconf's compiler detection
+      # Instead, let the GMP build_gmp.sh script handle compiler selection
+      # Only set these for the final linking phase, not during configure
+      config.build_settings.delete('CC')
+      config.build_settings.delete('CXX')
+      config.build_settings.delete('CPP')
+      config.build_settings.delete('CXXCPP')
+    end
   end
 end
