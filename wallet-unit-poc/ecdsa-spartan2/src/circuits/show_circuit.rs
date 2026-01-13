@@ -1,49 +1,64 @@
-use crate::{utils::*, Scalar, E};
+use crate::{paths::PathConfig, utils::*, Scalar, E};
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circom_scotia::{reader::load_r1cs, synthesize};
 use serde_json::Value;
 use spartan2::traits::circuit::SpartanCircuit;
-use std::{any::type_name, env::current_dir, fs::File, path::PathBuf, time::Instant};
+use std::{any::type_name, fs::File, path::PathBuf, time::Instant};
 use tracing::info;
 
 witnesscalc_adapter::witness!(show);
 
 // show.circom
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ShowCircuit {
+    /// Path configuration for resolving file paths
+    path_config: PathConfig,
+    /// Optional override for input JSON path
     input_path: Option<PathBuf>,
 }
 
-impl ShowCircuit {
-    pub fn new<P: Into<Option<PathBuf>>>(path: P) -> Self {
+impl Default for ShowCircuit {
+    fn default() -> Self {
         Self {
+            path_config: PathConfig::default(),
+            input_path: None,
+        }
+    }
+}
+
+impl ShowCircuit {
+    /// Create a new ShowCircuit with PathConfig and optional input path override.
+    pub fn new(path_config: PathConfig, input_path: Option<PathBuf>) -> Self {
+        Self {
+            path_config,
+            input_path,
+        }
+    }
+
+    /// Create from just an input path (for backwards compatibility).
+    /// Uses development PathConfig.
+    pub fn with_input_path<P: Into<Option<PathBuf>>>(path: P) -> Self {
+        Self {
+            path_config: PathConfig::development(),
             input_path: path.into(),
         }
     }
 
-    fn input_path_absolute(&self, cwd: &PathBuf) -> PathBuf {
+    /// Resolve the input JSON path using PathConfig.
+    fn resolve_input_json(&self) -> PathBuf {
         self.input_path
             .as_ref()
-            .map(|p| {
-                if p.is_absolute() {
-                    p.clone()
-                } else {
-                    cwd.join(p)
-                }
-            })
-            .unwrap_or_else(|| {
-                // Try mobile flat path first, fall back to development nested path
-                let mobile_path = cwd.join("show_input.json");
-                if mobile_path.exists() {
-                    mobile_path
-                } else {
-                    cwd.join("../circom/inputs/show/default.json")
-                }
-            })
+            .map(|p| self.path_config.resolve(p))
+            .unwrap_or_else(|| self.path_config.input_json("show"))
     }
 
-    fn load_inputs(&self, cwd: &PathBuf) -> Result<Value, SynthesisError> {
-        let path = self.input_path_absolute(cwd);
+    /// Get the R1CS file path.
+    fn r1cs_path(&self) -> PathBuf {
+        self.path_config.r1cs_path("show")
+    }
+
+    fn load_inputs(&self) -> Result<Value, SynthesisError> {
+        let path = self.resolve_input_json();
         info!("Loading show inputs from {}", path.display());
         let file = File::open(&path).map_err(|_| SynthesisError::AssignmentMissing)?;
         serde_json::from_reader(file).map_err(|_| SynthesisError::AssignmentMissing)
@@ -58,11 +73,8 @@ impl SpartanCircuit<E> for ShowCircuit {
         _: &[AllocatedNum<Scalar>],
         _: Option<&[Scalar]>,
     ) -> Result<(), SynthesisError> {
-        let cwd = current_dir().unwrap();
-        let root = cwd.join("../circom");
-        let witness_dir = root.join("build/show/show_js");
-        let r1cs = witness_dir.join("show.r1cs");
-        let json_value = self.load_inputs(&cwd)?;
+        let r1cs_path = self.r1cs_path();
+        let json_value = self.load_inputs()?;
 
         // Parse inputs using declarative field definitions
         let inputs = parse_show_inputs(&json_value)?;
@@ -73,7 +85,7 @@ impl SpartanCircuit<E> for ShowCircuit {
         let is_setup_phase = cs_type.contains("ShapeCS");
 
         if is_setup_phase {
-            let r1cs = load_r1cs(r1cs);
+            let r1cs = load_r1cs(&r1cs_path);
             // Pass None for witness during setup
             synthesize(cs, r1cs, None)?;
             return Ok(());
@@ -86,15 +98,15 @@ impl SpartanCircuit<E> for ShowCircuit {
         let inputs_json = hashmap_to_json_string(&inputs)?;
 
         // Generate raw witness bytes
-        let witness_bytes = show_witness(&inputs_json)
-            .map_err(|_| SynthesisError::Unsatisfiable)?;
+        let witness_bytes =
+            show_witness(&inputs_json).map_err(|_| SynthesisError::Unsatisfiable)?;
 
         info!("witnesscalc time: {} ms", t0.elapsed().as_millis());
 
         // Parse witness bytes directly to Scalar
         let witness = parse_witness(&witness_bytes)?;
 
-        let r1cs = load_r1cs(r1cs);
+        let r1cs = load_r1cs(&r1cs_path);
         synthesize(cs, r1cs, Some(witness))?;
         Ok(())
     }
@@ -106,8 +118,7 @@ impl SpartanCircuit<E> for ShowCircuit {
         &self,
         cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        let cwd = current_dir().unwrap();
-        let json_value = self.load_inputs(&cwd)?;
+        let json_value = self.load_inputs()?;
 
         let inputs = parse_show_inputs(&json_value)?;
         let keybinding_x_bigint = inputs.get("deviceKeyX").unwrap()[0].clone();

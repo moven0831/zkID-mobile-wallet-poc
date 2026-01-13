@@ -20,12 +20,14 @@
 
 use ecdsa_spartan2::{
     generate_shared_blinds, load_instance, load_proof, load_shared_blinds, load_witness,
+    paths::keys::{
+        PREPARE_INSTANCE, PREPARE_PROOF, PREPARE_PROVING_KEY, PREPARE_VERIFYING_KEY,
+        PREPARE_WITNESS, SHARED_BLINDS, SHOW_INSTANCE, SHOW_PROOF, SHOW_PROVING_KEY,
+        SHOW_VERIFYING_KEY, SHOW_WITNESS,
+    },
     prove_circuit, prove_circuit_with_pk, reblind, reblind_with_loaded_data, run_circuit,
-    save_keys, setup::PREPARE_INSTANCE, setup::PREPARE_PROOF, setup::PREPARE_PROVING_KEY,
-    setup::PREPARE_VERIFYING_KEY, setup::PREPARE_WITNESS, setup::SHARED_BLINDS,
-    setup::SHOW_INSTANCE, setup::SHOW_PROOF, setup::SHOW_PROVING_KEY, setup::SHOW_VERIFYING_KEY,
-    setup::SHOW_WITNESS, setup_circuit_keys, setup_circuit_keys_no_save, verify_circuit,
-    verify_circuit_with_loaded_data, PrepareCircuit, ShowCircuit, E,
+    save_keys, setup_circuit_keys, setup_circuit_keys_no_save, verify_circuit,
+    verify_circuit_with_loaded_data, PathConfig, PrepareCircuit, ShowCircuit, E,
 };
 use std::{env::args, fs, path::PathBuf, process, time::Instant};
 use tracing::info;
@@ -214,7 +216,7 @@ fn run_complete_pipeline(input_path: Option<PathBuf>) -> BenchmarkResults {
 
     // Step 1: Setup Prepare Circuit
     info!("Step 1/9: Setting up Prepare circuit...");
-    let prepare_circuit = PrepareCircuit::new(input_path.clone());
+    let prepare_circuit = PrepareCircuit::new(PathConfig::development(), input_path.clone());
     let t0 = Instant::now();
     let (prepare_pk, prepare_vk) = setup_circuit_keys_no_save(prepare_circuit);
     let prepare_setup_ms = t0.elapsed().as_millis();
@@ -233,7 +235,7 @@ fn run_complete_pipeline(input_path: Option<PathBuf>) -> BenchmarkResults {
 
     // Step 2: Setup Show Circuit
     info!("Step 2/9: Setting up Show circuit...");
-    let show_circuit = ShowCircuit::new(input_path.clone());
+    let show_circuit = ShowCircuit::new(PathConfig::development(), input_path.clone());
     let t0 = Instant::now();
     let (show_pk, show_vk) = setup_circuit_keys_no_save(show_circuit);
     let show_setup_ms = t0.elapsed().as_millis();
@@ -257,7 +259,7 @@ fn run_complete_pipeline(input_path: Option<PathBuf>) -> BenchmarkResults {
     // Step 4: Prove Prepare Circuit
     info!("Step 4/9: Proving Prepare circuit...");
     let t0 = Instant::now();
-    let prepare_circuit = PrepareCircuit::new(input_path.clone());
+    let prepare_circuit = PrepareCircuit::new(PathConfig::development(), input_path.clone());
     prove_circuit_with_pk(
         prepare_circuit,
         &prepare_pk,
@@ -292,7 +294,7 @@ fn run_complete_pipeline(input_path: Option<PathBuf>) -> BenchmarkResults {
     // Step 6: Prove Show Circuit
     info!("Step 6/9: Proving Show circuit...");
     let t0 = Instant::now();
-    let show_circuit = ShowCircuit::new(input_path.clone());
+    let show_circuit = ShowCircuit::new(PathConfig::development(), input_path.clone());
     prove_circuit_with_pk(
         show_circuit,
         &show_pk,
@@ -385,16 +387,16 @@ fn execute_prepare(action: CircuitAction, options: CommandOptions) {
                 input = ?options.input,
                 "Setting up Spartan-2 keys for the Prepare circuit"
             );
-            let circuit = PrepareCircuit::new(options.input.clone());
+            let circuit = PrepareCircuit::new(PathConfig::development(), options.input.clone());
             setup_circuit_keys(circuit, PREPARE_PROVING_KEY, PREPARE_VERIFYING_KEY);
         }
         CircuitAction::Run => {
-            let circuit = PrepareCircuit::new(options.input.clone());
+            let circuit = PrepareCircuit::new(PathConfig::development(), options.input.clone());
             info!("Running Prepare circuit with ZK-Spartan");
             run_circuit(circuit);
         }
         CircuitAction::Prove => {
-            let circuit = PrepareCircuit::new(options.input.clone());
+            let circuit = PrepareCircuit::new(PathConfig::development(), options.input.clone());
             info!("Proving Prepare circuit with ZK-Spartan");
             prove_circuit(
                 circuit,
@@ -434,16 +436,16 @@ fn execute_show(action: CircuitAction, options: CommandOptions) {
     match action {
         CircuitAction::Setup => {
             info!(input = ?options.input, "Setting up Spartan-2 keys for the Show circuit");
-            let circuit = ShowCircuit::new(options.input.clone());
+            let circuit = ShowCircuit::new(PathConfig::development(), options.input.clone());
             setup_circuit_keys(circuit, SHOW_PROVING_KEY, SHOW_VERIFYING_KEY);
         }
         CircuitAction::Run => {
-            let circuit = ShowCircuit::new(options.input.clone());
+            let circuit = ShowCircuit::new(PathConfig::development(), options.input.clone());
             info!("Running Show circuit with ZK-Spartan");
             run_circuit(circuit);
         }
         CircuitAction::Prove => {
-            let circuit = ShowCircuit::new(options.input.clone());
+            let circuit = ShowCircuit::new(PathConfig::development(), options.input.clone());
             info!("Proving Show circuit with ZK-Spartan");
             prove_circuit(
                 circuit,

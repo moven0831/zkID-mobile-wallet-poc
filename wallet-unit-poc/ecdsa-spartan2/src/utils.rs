@@ -120,9 +120,7 @@ pub fn convert_bigint_to_scalar(
 }
 
 /// Parses the Circom witness binary format (.wtns) directly to Scalar vector
-pub fn parse_witness(
-    witness_bytes: &[u8],
-) -> Result<Vec<Scalar>, SynthesisError> {
+pub fn parse_witness(witness_bytes: &[u8]) -> Result<Vec<Scalar>, SynthesisError> {
     let mut pos = 0;
 
     // Validate .wtns header (4 bytes magic)
@@ -217,10 +215,11 @@ pub fn hashmap_to_json_string(
     let mut json_map = serde_json::Map::new();
 
     // Define 2D array fields and their dimensions (rows, cols)
-    let two_d_fields: HashMap<&str, (usize, usize)> = [
-        ("claims", (4, 128)),
-        ("matchSubstring", (4, 50)),
-    ].iter().cloned().collect();
+    let two_d_fields: HashMap<&str, (usize, usize)> =
+        [("claims", (4, 128)), ("matchSubstring", (4, 50))]
+            .iter()
+            .cloned()
+            .collect();
 
     for (key, values) in inputs.iter() {
         // Check if this is a 2D array field
@@ -243,10 +242,8 @@ pub fn hashmap_to_json_string(
             json_map.insert(key.clone(), json!(array_2d));
         } else {
             // Regular 1D array
-            let string_array: Vec<String> = values
-                .iter()
-                .map(|bigint| bigint.to_string())
-                .collect();
+            let string_array: Vec<String> =
+                values.iter().map(|bigint| bigint.to_string()).collect();
             json_map.insert(key.clone(), json!(string_array));
         }
     }

@@ -1,7 +1,8 @@
-use std::{env::current_dir, fs::File, time::Instant};
+use std::{fs::File, path::Path, time::Instant};
 
 use crate::{
     circuits::prepare_circuit::jwt_witness,
+    paths::PathConfig,
     setup::{
         load_instance, load_proof, load_proving_key, load_shared_blinds, load_verifying_key,
         load_witness, save_instance, save_proof, save_shared_blinds, save_witness,
@@ -61,7 +62,7 @@ pub fn run_circuit<C: SpartanCircuit<E> + Clone + std::fmt::Debug>(circuit: C) {
     info!("comm_W_shared: {:?}", proof.comm_W_shared());
 }
 
-pub fn generate_shared_blinds<E: Engine>(shared_blinds_path: &str, n: usize) {
+pub fn generate_shared_blinds<E: Engine>(shared_blinds_path: impl AsRef<Path>, n: usize) {
     let blinds: Vec<_> = (0..n).map(|_| E::Scalar::random(OsRng)).collect();
     if let Err(e) = save_shared_blinds::<E>(shared_blinds_path, &blinds) {
         eprintln!("Failed to save instance: {}", e);
@@ -72,13 +73,13 @@ pub fn generate_shared_blinds<E: Engine>(shared_blinds_path: &str, n: usize) {
 /// Only run the proving part of the circuit using ZK-Spartan (prep_prove, prove)
 pub fn prove_circuit<C: SpartanCircuit<E> + Clone + std::fmt::Debug>(
     circuit: C,
-    pk_path: &str,
-    instance_path: &str,
-    witness_path: &str,
-    proof_path: &str,
+    pk_path: impl AsRef<Path>,
+    instance_path: impl AsRef<Path>,
+    witness_path: impl AsRef<Path>,
+    proof_path: impl AsRef<Path>,
 ) {
     let t0 = Instant::now();
-    let pk = load_proving_key(pk_path).expect("load proving key failed");
+    let pk = load_proving_key(&pk_path).expect("load proving key failed");
     let load_pk_ms = t0.elapsed().as_millis();
 
     info!("ZK-Spartan load proving key: {} ms", load_pk_ms);
@@ -91,9 +92,9 @@ pub fn prove_circuit<C: SpartanCircuit<E> + Clone + std::fmt::Debug>(
 pub fn prove_circuit_with_pk<C: SpartanCircuit<E> + Clone + std::fmt::Debug>(
     circuit: C,
     pk: &<R1CSSNARK<E> as R1CSSNARKTrait<E>>::ProverKey,
-    instance_path: &str,
-    witness_path: &str,
-    proof_path: &str,
+    instance_path: impl AsRef<Path>,
+    witness_path: impl AsRef<Path>,
+    proof_path: impl AsRef<Path>,
 ) {
     let t0 = Instant::now();
     let mut prep_snark =
@@ -158,17 +159,17 @@ pub fn prove_circuit_with_pk<C: SpartanCircuit<E> + Clone + std::fmt::Debug>(
 
 pub fn reblind<C: SpartanCircuit<E>>(
     circuit: C,
-    pk_path: &str,
-    instance_path: &str,
-    witness_path: &str,
-    proof_path: &str,
-    shared_blinds_path: &str,
+    pk_path: impl AsRef<Path>,
+    instance_path: impl AsRef<Path>,
+    witness_path: impl AsRef<Path>,
+    proof_path: impl AsRef<Path>,
+    shared_blinds_path: impl AsRef<Path>,
 ) {
-    let pk = load_proving_key(pk_path).expect("load proving key failed");
-    let instance = load_instance(instance_path).expect("load instance failed");
-    let witness = load_witness(witness_path).expect("load witness failed");
+    let pk = load_proving_key(&pk_path).expect("load proving key failed");
+    let instance = load_instance(&instance_path).expect("load instance failed");
+    let witness = load_witness(&witness_path).expect("load witness failed");
     let randomness =
-        load_shared_blinds::<E>(shared_blinds_path).expect("load shared_blinds failed");
+        load_shared_blinds::<E>(&shared_blinds_path).expect("load shared_blinds failed");
 
     reblind_with_loaded_data(
         circuit,
@@ -189,9 +190,9 @@ pub fn reblind_with_loaded_data<C: SpartanCircuit<E>>(
     instance: spartan2::r1cs::SplitR1CSInstance<E>,
     witness: spartan2::r1cs::R1CSWitness<E>,
     randomness: &[<E as Engine>::Scalar],
-    instance_path: &str,
-    witness_path: &str,
-    proof_path: &str,
+    instance_path: impl AsRef<Path>,
+    witness_path: impl AsRef<Path>,
+    proof_path: impl AsRef<Path>,
 ) {
     assert_eq!(randomness.len(), instance.num_shared_rows());
 
@@ -250,9 +251,9 @@ pub fn reblind_with_loaded_data<C: SpartanCircuit<E>>(
 }
 
 /// Only run the verification part using ZK-Spartan
-pub fn verify_circuit(proof_path: &str, vk_path: &str) {
-    let proof = load_proof(proof_path).expect("load proof failed");
-    let vk = load_verifying_key(vk_path).expect("load verifying key failed");
+pub fn verify_circuit(proof_path: impl AsRef<Path>, vk_path: impl AsRef<Path>) {
+    let proof = load_proof(&proof_path).expect("load proof failed");
+    let vk = load_verifying_key(&vk_path).expect("load verifying key failed");
 
     verify_circuit_with_loaded_data(&proof, &vk);
 }
@@ -272,21 +273,17 @@ pub fn verify_circuit_with_loaded_data(
 
 /// Generate witness for the Prepare circuit.
 /// Returns the full witness vector, the decoded age-claim bytes, and the extracted KeyBindingX/Y values.
+///
+/// # Arguments
+/// * `config` - Path configuration for resolving file paths
+/// * `input_json_path` - Optional override for input JSON path (absolute or relative to config.base_dir)
 pub fn generate_prepare_witness(
-    input_json_path: Option<&std::path::Path>,
+    config: &PathConfig,
+    input_json_path: Option<&Path>,
 ) -> Result<Vec<Scalar>, SynthesisError> {
     let json_path = input_json_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            let cwd = current_dir().unwrap();
-            // Try mobile flat path first, fall back to development nested path
-            let mobile_path = cwd.join("jwt_input.json");
-            if mobile_path.exists() {
-                mobile_path
-            } else {
-                cwd.join("../circom/inputs/jwt/default.json")
-            }
-        });
+        .map(|p| config.resolve(p))
+        .unwrap_or_else(|| config.input_json("jwt"));
 
     info!("Loading prepare inputs from {}", json_path.display());
 
@@ -305,8 +302,7 @@ pub fn generate_prepare_witness(
     let inputs_json = hashmap_to_json_string(&inputs)?;
 
     // Generate raw witness bytes
-    let witness_bytes = jwt_witness(&inputs_json)
-        .map_err(|_| SynthesisError::Unsatisfiable)?;
+    let witness_bytes = jwt_witness(&inputs_json).map_err(|_| SynthesisError::Unsatisfiable)?;
 
     info!("witnesscalc time: {} ms", t0.elapsed().as_millis());
 

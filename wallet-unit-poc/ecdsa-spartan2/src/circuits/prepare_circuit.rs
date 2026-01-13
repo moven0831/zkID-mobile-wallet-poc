@@ -1,4 +1,5 @@
 use crate::{
+    paths::PathConfig,
     prover::generate_prepare_witness,
     utils::{compute_prepare_shared_scalars, PrepareSharedScalars},
     Scalar, E,
@@ -7,43 +8,57 @@ use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circom_scotia::{reader::load_r1cs, synthesize};
 use serde_json::Value;
 use spartan2::traits::circuit::SpartanCircuit;
-use std::{any::type_name, env::current_dir, fs::File, path::PathBuf};
+use std::{any::type_name, fs::File, path::PathBuf};
 
 witnesscalc_adapter::witness!(jwt);
 
 // jwt.circom
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PrepareCircuit {
+    /// Path configuration for resolving file paths
+    path_config: PathConfig,
+    /// Optional override for input JSON path
     input_path: Option<PathBuf>,
 }
 
-impl PrepareCircuit {
-    pub fn new<P: Into<Option<PathBuf>>>(path: P) -> Self {
+impl Default for PrepareCircuit {
+    fn default() -> Self {
         Self {
+            path_config: PathConfig::default(),
+            input_path: None,
+        }
+    }
+}
+
+impl PrepareCircuit {
+    /// Create a new PrepareCircuit with PathConfig and optional input path override.
+    pub fn new(path_config: PathConfig, input_path: Option<PathBuf>) -> Self {
+        Self {
+            path_config,
+            input_path,
+        }
+    }
+
+    /// Create from just an input path (for backwards compatibility).
+    /// Uses development PathConfig.
+    pub fn with_input_path<P: Into<Option<PathBuf>>>(path: P) -> Self {
+        Self {
+            path_config: PathConfig::development(),
             input_path: path.into(),
         }
     }
 
-    fn input_path_absolute(&self, cwd: &PathBuf) -> Option<PathBuf> {
-        self.input_path.as_ref().map(|p| {
-            if p.is_absolute() {
-                p.clone()
-            } else {
-                cwd.join(p)
-            }
-        })
+    /// Resolve the input JSON path using PathConfig.
+    fn resolve_input_json(&self) -> PathBuf {
+        self.input_path
+            .as_ref()
+            .map(|p| self.path_config.resolve(p))
+            .unwrap_or_else(|| self.path_config.input_json("jwt"))
     }
 
-    fn resolve_input_json(&self, cwd: &PathBuf) -> PathBuf {
-        self.input_path_absolute(cwd).unwrap_or_else(|| {
-            // Try mobile flat path first, fall back to development nested path
-            let mobile_path = cwd.join("jwt_input.json");
-            if mobile_path.exists() {
-                mobile_path
-            } else {
-                cwd.join("../circom/inputs/jwt/default.json")
-            }
-        })
+    /// Get the R1CS file path.
+    fn r1cs_path(&self) -> PathBuf {
+        self.path_config.r1cs_path("jwt")
     }
 }
 
@@ -55,10 +70,7 @@ impl SpartanCircuit<E> for PrepareCircuit {
         _: &[AllocatedNum<Scalar>],
         _: Option<&[Scalar]>,
     ) -> Result<(), SynthesisError> {
-        let cwd = current_dir().unwrap();
-        let root = cwd.join("../circom");
-        let witness_dir = root.join("build/jwt/jwt_js");
-        let r1cs = witness_dir.join("jwt.r1cs");
+        let r1cs_path = self.r1cs_path();
 
         // Detect if we're in setup phase (ShapeCS) or prove phase (SatisfyingAssignment)
         // During setup, we only need constraint structure instead of actual witness values
@@ -66,17 +78,19 @@ impl SpartanCircuit<E> for PrepareCircuit {
         let is_setup_phase = cs_type.contains("ShapeCS");
 
         if is_setup_phase {
-            let r1cs = load_r1cs(r1cs);
+            let r1cs = load_r1cs(&r1cs_path);
             // Pass None for witness during setup
             synthesize(cs, r1cs, None)?;
             return Ok(());
         }
 
         // Generate witness using the dedicated function
-        let input_path = self.input_path_absolute(&cwd);
-        let witness = generate_prepare_witness(input_path.as_ref().map(|p| p.as_path()))?;
+        let witness = generate_prepare_witness(
+            &self.path_config,
+            self.input_path.as_ref().map(|p| p.as_path()),
+        )?;
 
-        let r1cs = load_r1cs(r1cs);
+        let r1cs = load_r1cs(&r1cs_path);
         synthesize(cs, r1cs, Some(witness))?;
         Ok(())
     }
@@ -88,8 +102,7 @@ impl SpartanCircuit<E> for PrepareCircuit {
         &self,
         cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        let cwd = current_dir().unwrap();
-        let json_path = self.resolve_input_json(&cwd);
+        let json_path = self.resolve_input_json();
 
         let json_file = File::open(&json_path).map_err(|_| SynthesisError::AssignmentMissing)?;
 

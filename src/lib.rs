@@ -1,16 +1,17 @@
 use ecdsa_spartan2::{
     load_instance, load_proof, load_shared_blinds, load_witness,
+    paths::keys::{
+        PREPARE_INSTANCE, PREPARE_PROOF, PREPARE_PROVING_KEY, PREPARE_VERIFYING_KEY,
+        PREPARE_WITNESS, SHARED_BLINDS, SHOW_INSTANCE, SHOW_PROOF, SHOW_PROVING_KEY,
+        SHOW_VERIFYING_KEY, SHOW_WITNESS,
+    },
     prover::{
-        generate_shared_blinds as gen_shared_blinds, prove_circuit, prove_circuit_with_pk,
-        reblind, reblind_with_loaded_data, verify_circuit, verify_circuit_with_loaded_data,
+        generate_shared_blinds as gen_shared_blinds, prove_circuit, prove_circuit_with_pk, reblind,
+        reblind_with_loaded_data, verify_circuit, verify_circuit_with_loaded_data,
     },
     save_keys,
-    setup::{
-        setup_circuit_keys, setup_circuit_keys_no_save, PREPARE_INSTANCE, PREPARE_PROOF,
-        PREPARE_PROVING_KEY, PREPARE_VERIFYING_KEY, PREPARE_WITNESS, SHARED_BLINDS,
-        SHOW_INSTANCE, SHOW_PROOF, SHOW_PROVING_KEY, SHOW_VERIFYING_KEY, SHOW_WITNESS,
-    },
-    PrepareCircuit, ShowCircuit, E,
+    setup::{setup_circuit_keys, setup_circuit_keys_no_save},
+    PathConfig, PrepareCircuit, ShowCircuit, E,
 };
 use std::path::PathBuf;
 
@@ -111,23 +112,9 @@ impl From<std::io::Error> for ZkProofError {
 // Helper Functions
 // ============================================================================
 
-/// Safely execute a function with a changed working directory
-fn with_working_dir<F, T>(path: &str, f: F) -> Result<T, ZkProofError>
-where
-    F: FnOnce() -> Result<T, ZkProofError>,
-{
-    let original_dir = std::env::current_dir()?;
-
-    std::env::set_current_dir(path).map_err(|e| ZkProofError::IoError {
-        message: format!("Failed to set working directory to '{}': {}", path, e),
-    })?;
-
-    let result = f();
-
-    // Always restore original directory, even on error
-    let _ = std::env::set_current_dir(original_dir);
-
-    result
+/// Create a PathConfig for the given documents path (mobile environment).
+fn make_config(documents_path: &str) -> PathConfig {
+    PathConfig::mobile(documents_path)
 }
 
 // ============================================================================
@@ -141,18 +128,21 @@ pub fn setup_prepare_keys(
     documents_path: String,
     input_path: Option<String>,
 ) -> Result<String, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let circuit = PrepareCircuit::new(input_path.map(PathBuf::from));
+    let config = make_config(&documents_path);
+    let circuit = PrepareCircuit::new(config.clone(), input_path.map(PathBuf::from));
 
-        let start = std::time::Instant::now();
-        setup_circuit_keys(circuit, PREPARE_PROVING_KEY, PREPARE_VERIFYING_KEY);
-        let elapsed_ms = start.elapsed().as_millis();
+    let start = std::time::Instant::now();
+    setup_circuit_keys(
+        circuit,
+        config.key_path(PREPARE_PROVING_KEY),
+        config.key_path(PREPARE_VERIFYING_KEY),
+    );
+    let elapsed_ms = start.elapsed().as_millis();
 
-        Ok(format!(
-            "Prepare circuit keys setup completed in {}ms",
-            elapsed_ms
-        ))
-    })
+    Ok(format!(
+        "Prepare circuit keys setup completed in {}ms",
+        elapsed_ms
+    ))
 }
 
 /// Setup Show circuit keys
@@ -162,18 +152,21 @@ pub fn setup_show_keys(
     documents_path: String,
     input_path: Option<String>,
 ) -> Result<String, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let circuit = ShowCircuit::new(input_path.map(PathBuf::from));
+    let config = make_config(&documents_path);
+    let circuit = ShowCircuit::new(config.clone(), input_path.map(PathBuf::from));
 
-        let start = std::time::Instant::now();
-        setup_circuit_keys(circuit, SHOW_PROVING_KEY, SHOW_VERIFYING_KEY);
-        let elapsed_ms = start.elapsed().as_millis();
+    let start = std::time::Instant::now();
+    setup_circuit_keys(
+        circuit,
+        config.key_path(SHOW_PROVING_KEY),
+        config.key_path(SHOW_VERIFYING_KEY),
+    );
+    let elapsed_ms = start.elapsed().as_millis();
 
-        Ok(format!(
-            "Show circuit keys setup completed in {}ms",
-            elapsed_ms
-        ))
-    })
+    Ok(format!(
+        "Show circuit keys setup completed in {}ms",
+        elapsed_ms
+    ))
 }
 
 // ============================================================================
@@ -184,17 +177,15 @@ pub fn setup_show_keys(
 /// Creates random blinding factors that enable proof reblinding
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn generate_shared_blinds(documents_path: String) -> Result<String, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        use ecdsa_spartan2::prover::generate_shared_blinds as gen_blinds;
+    let config = make_config(&documents_path);
 
-        // Note: While circuits have 98 shared values (2 keybindings + 96 claim scalars),
-        // Hyrax batches all these into a single commitment point.
-        // num_shared_rows() returns the number of Hyrax commitment points, not individual scalars.
-        const NUM_SHARED: usize = 1;
-        gen_blinds::<E>(SHARED_BLINDS, NUM_SHARED);
+    // Note: While circuits have 98 shared values (2 keybindings + 96 claim scalars),
+    // Hyrax batches all these into a single commitment point.
+    // num_shared_rows() returns the number of Hyrax commitment points, not individual scalars.
+    const NUM_SHARED: usize = 1;
+    gen_shared_blinds::<E>(config.artifact_path(SHARED_BLINDS), NUM_SHARED);
 
-        Ok("Shared blinds generated successfully".to_string())
-    })
+    Ok("Shared blinds generated successfully".to_string())
 }
 
 // ============================================================================
@@ -208,30 +199,29 @@ pub fn prove_prepare(
     documents_path: String,
     input_path: Option<String>,
 ) -> Result<ProofResult, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let circuit = PrepareCircuit::new(input_path.map(PathBuf::from));
+    let config = make_config(&documents_path);
+    let circuit = PrepareCircuit::new(config.clone(), input_path.map(PathBuf::from));
 
-        let start = std::time::Instant::now();
-        prove_circuit(
-            circuit,
-            PREPARE_PROVING_KEY,
-            PREPARE_INSTANCE,
-            PREPARE_WITNESS,
-            PREPARE_PROOF,
-        );
-        let total_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    prove_circuit(
+        circuit,
+        config.key_path(PREPARE_PROVING_KEY),
+        config.artifact_path(PREPARE_INSTANCE),
+        config.artifact_path(PREPARE_WITNESS),
+        config.artifact_path(PREPARE_PROOF),
+    );
+    let total_ms = start.elapsed().as_millis() as u64;
 
-        // Get proof size and comm_W_shared
-        let proof_size_bytes = get_proof_size(PREPARE_PROOF)?;
-        let comm_w_shared = extract_comm_w_shared(PREPARE_INSTANCE)?;
+    // Get proof size and comm_W_shared
+    let proof_size_bytes = get_proof_size(&config.artifact_path(PREPARE_PROOF))?;
+    let comm_w_shared = extract_comm_w_shared(&config.artifact_path(PREPARE_INSTANCE))?;
 
-        Ok(ProofResult {
-            prep_ms: 0, // prover doesn't separate timing
-            prove_ms: total_ms,
-            total_ms,
-            proof_size_bytes,
-            comm_w_shared,
-        })
+    Ok(ProofResult {
+        prep_ms: 0, // prover doesn't separate timing
+        prove_ms: total_ms,
+        total_ms,
+        proof_size_bytes,
+        comm_w_shared,
     })
 }
 
@@ -242,30 +232,29 @@ pub fn prove_show(
     documents_path: String,
     input_path: Option<String>,
 ) -> Result<ProofResult, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let circuit = ShowCircuit::new(input_path.map(PathBuf::from));
+    let config = make_config(&documents_path);
+    let circuit = ShowCircuit::new(config.clone(), input_path.map(PathBuf::from));
 
-        let start = std::time::Instant::now();
-        prove_circuit(
-            circuit,
-            SHOW_PROVING_KEY,
-            SHOW_INSTANCE,
-            SHOW_WITNESS,
-            SHOW_PROOF,
-        );
-        let total_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    prove_circuit(
+        circuit,
+        config.key_path(SHOW_PROVING_KEY),
+        config.artifact_path(SHOW_INSTANCE),
+        config.artifact_path(SHOW_WITNESS),
+        config.artifact_path(SHOW_PROOF),
+    );
+    let total_ms = start.elapsed().as_millis() as u64;
 
-        // Get proof size and comm_W_shared
-        let proof_size_bytes = get_proof_size(SHOW_PROOF)?;
-        let comm_w_shared = extract_comm_w_shared(SHOW_INSTANCE)?;
+    // Get proof size and comm_W_shared
+    let proof_size_bytes = get_proof_size(&config.artifact_path(SHOW_PROOF))?;
+    let comm_w_shared = extract_comm_w_shared(&config.artifact_path(SHOW_INSTANCE))?;
 
-        Ok(ProofResult {
-            prep_ms: 0,
-            prove_ms: total_ms,
-            total_ms,
-            proof_size_bytes,
-            comm_w_shared,
-        })
+    Ok(ProofResult {
+        prep_ms: 0,
+        prove_ms: total_ms,
+        total_ms,
+        proof_size_bytes,
+        comm_w_shared,
     })
 }
 
@@ -277,31 +266,30 @@ pub fn prove_show(
 /// Generates a new unlinkable proof while preserving comm_W_shared
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn reblind_prepare(documents_path: String) -> Result<ProofResult, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let circuit = PrepareCircuit::new(None);
+    let config = make_config(&documents_path);
+    let circuit = PrepareCircuit::new(config.clone(), None);
 
-        let start = std::time::Instant::now();
-        reblind(
-            circuit,
-            PREPARE_PROVING_KEY,
-            PREPARE_INSTANCE,
-            PREPARE_WITNESS,
-            PREPARE_PROOF,
-            SHARED_BLINDS,
-        );
-        let elapsed_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    reblind(
+        circuit,
+        config.key_path(PREPARE_PROVING_KEY),
+        config.artifact_path(PREPARE_INSTANCE),
+        config.artifact_path(PREPARE_WITNESS),
+        config.artifact_path(PREPARE_PROOF),
+        config.artifact_path(SHARED_BLINDS),
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
 
-        // Get proof size and comm_W_shared
-        let proof_size_bytes = get_proof_size(PREPARE_PROOF)?;
-        let comm_w_shared = extract_comm_w_shared(PREPARE_INSTANCE)?;
+    // Get proof size and comm_W_shared
+    let proof_size_bytes = get_proof_size(&config.artifact_path(PREPARE_PROOF))?;
+    let comm_w_shared = extract_comm_w_shared(&config.artifact_path(PREPARE_INSTANCE))?;
 
-        Ok(ProofResult {
-            prep_ms: 0,
-            prove_ms: elapsed_ms,
-            total_ms: elapsed_ms,
-            proof_size_bytes,
-            comm_w_shared,
-        })
+    Ok(ProofResult {
+        prep_ms: 0,
+        prove_ms: elapsed_ms,
+        total_ms: elapsed_ms,
+        proof_size_bytes,
+        comm_w_shared,
     })
 }
 
@@ -309,31 +297,30 @@ pub fn reblind_prepare(documents_path: String) -> Result<ProofResult, ZkProofErr
 /// Generates a new unlinkable proof while preserving comm_W_shared
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn reblind_show(documents_path: String) -> Result<ProofResult, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let circuit = ShowCircuit::new(None);
+    let config = make_config(&documents_path);
+    let circuit = ShowCircuit::new(config.clone(), None);
 
-        let start = std::time::Instant::now();
-        reblind(
-            circuit,
-            SHOW_PROVING_KEY,
-            SHOW_INSTANCE,
-            SHOW_WITNESS,
-            SHOW_PROOF,
-            SHARED_BLINDS,
-        );
-        let elapsed_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    reblind(
+        circuit,
+        config.key_path(SHOW_PROVING_KEY),
+        config.artifact_path(SHOW_INSTANCE),
+        config.artifact_path(SHOW_WITNESS),
+        config.artifact_path(SHOW_PROOF),
+        config.artifact_path(SHARED_BLINDS),
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
 
-        // Get proof size and comm_W_shared
-        let proof_size_bytes = get_proof_size(SHOW_PROOF)?;
-        let comm_w_shared = extract_comm_w_shared(SHOW_INSTANCE)?;
+    // Get proof size and comm_W_shared
+    let proof_size_bytes = get_proof_size(&config.artifact_path(SHOW_PROOF))?;
+    let comm_w_shared = extract_comm_w_shared(&config.artifact_path(SHOW_INSTANCE))?;
 
-        Ok(ProofResult {
-            prep_ms: 0,
-            prove_ms: elapsed_ms,
-            total_ms: elapsed_ms,
-            proof_size_bytes,
-            comm_w_shared,
-        })
+    Ok(ProofResult {
+        prep_ms: 0,
+        prove_ms: elapsed_ms,
+        total_ms: elapsed_ms,
+        proof_size_bytes,
+        comm_w_shared,
     })
 }
 
@@ -345,20 +332,24 @@ pub fn reblind_show(documents_path: String) -> Result<ProofResult, ZkProofError>
 /// Verifies the proof using the verifying key
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn verify_prepare(documents_path: String) -> Result<bool, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        verify_circuit(PREPARE_PROOF, PREPARE_VERIFYING_KEY);
-        Ok(true)
-    })
+    let config = make_config(&documents_path);
+    verify_circuit(
+        config.artifact_path(PREPARE_PROOF),
+        config.key_path(PREPARE_VERIFYING_KEY),
+    );
+    Ok(true)
 }
 
 /// Verify Show circuit proof
 /// Verifies the proof using the verifying key
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn verify_show(documents_path: String) -> Result<bool, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        verify_circuit(SHOW_PROOF, SHOW_VERIFYING_KEY);
-        Ok(true)
-    })
+    let config = make_config(&documents_path);
+    verify_circuit(
+        config.artifact_path(SHOW_PROOF),
+        config.key_path(SHOW_VERIFYING_KEY),
+    );
+    Ok(true)
 }
 
 // ============================================================================
@@ -373,173 +364,188 @@ pub fn run_complete_benchmark(
     documents_path: String,
     input_path: Option<String>,
 ) -> Result<BenchmarkResults, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        // Note: While circuits have 98 shared values (2 keybindings + 96 claim scalars),
-        // Hyrax batches all these into a single commitment point.
-        // num_shared_rows() returns the number of Hyrax commitment points, not individual scalars.
-        const NUM_SHARED: usize = 1;
+    let config = make_config(&documents_path);
 
-        // Step 1: Setup Prepare Circuit
-        let prepare_circuit = PrepareCircuit::new(input_path.as_ref().map(PathBuf::from));
-        let start = std::time::Instant::now();
-        let (prepare_pk, prepare_vk) = setup_circuit_keys_no_save(prepare_circuit);
-        let prepare_setup_ms = start.elapsed().as_millis() as u64;
+    // Note: While circuits have 98 shared values (2 keybindings + 96 claim scalars),
+    // Hyrax batches all these into a single commitment point.
+    // num_shared_rows() returns the number of Hyrax commitment points, not individual scalars.
+    const NUM_SHARED: usize = 1;
 
-        // Save Prepare keys after timing
-        save_keys(
-            PREPARE_PROVING_KEY,
-            PREPARE_VERIFYING_KEY,
-            &prepare_pk,
-            &prepare_vk,
-        )
-        .map_err(|e| ZkProofError::IoError {
-            message: format!("Failed to save Prepare keys: {}", e),
-        })?;
+    // Step 1: Setup Prepare Circuit
+    let prepare_circuit =
+        PrepareCircuit::new(config.clone(), input_path.as_ref().map(PathBuf::from));
+    let start = std::time::Instant::now();
+    let (prepare_pk, prepare_vk) = setup_circuit_keys_no_save(prepare_circuit);
+    let prepare_setup_ms = start.elapsed().as_millis() as u64;
 
-        // Step 2: Setup Show Circuit
-        let show_circuit = ShowCircuit::new(input_path.as_ref().map(PathBuf::from));
-        let start = std::time::Instant::now();
-        let (show_pk, show_vk) = setup_circuit_keys_no_save(show_circuit);
-        let show_setup_ms = start.elapsed().as_millis() as u64;
+    // Save Prepare keys after timing
+    save_keys(
+        config.key_path(PREPARE_PROVING_KEY),
+        config.key_path(PREPARE_VERIFYING_KEY),
+        &prepare_pk,
+        &prepare_vk,
+    )
+    .map_err(|e| ZkProofError::IoError {
+        message: format!("Failed to save Prepare keys: {}", e),
+    })?;
 
-        // Save Show keys after timing
-        save_keys(SHOW_PROVING_KEY, SHOW_VERIFYING_KEY, &show_pk, &show_vk).map_err(|e| {
-            ZkProofError::IoError {
-                message: format!("Failed to save Show keys: {}", e),
+    // Step 2: Setup Show Circuit
+    let show_circuit = ShowCircuit::new(config.clone(), input_path.as_ref().map(PathBuf::from));
+    let start = std::time::Instant::now();
+    let (show_pk, show_vk) = setup_circuit_keys_no_save(show_circuit);
+    let show_setup_ms = start.elapsed().as_millis() as u64;
+
+    // Save Show keys after timing
+    save_keys(
+        config.key_path(SHOW_PROVING_KEY),
+        config.key_path(SHOW_VERIFYING_KEY),
+        &show_pk,
+        &show_vk,
+    )
+    .map_err(|e| ZkProofError::IoError {
+        message: format!("Failed to save Show keys: {}", e),
+    })?;
+
+    // Step 3: Generate Shared Blinds
+    let start = std::time::Instant::now();
+    gen_shared_blinds::<E>(config.artifact_path(SHARED_BLINDS), NUM_SHARED);
+    let generate_blinds_ms = start.elapsed().as_millis() as u64;
+
+    // Step 4: Prove Prepare Circuit
+    let start = std::time::Instant::now();
+    let prepare_circuit =
+        PrepareCircuit::new(config.clone(), input_path.as_ref().map(PathBuf::from));
+    prove_circuit_with_pk(
+        prepare_circuit,
+        &prepare_pk,
+        config.artifact_path(PREPARE_INSTANCE),
+        config.artifact_path(PREPARE_WITNESS),
+        config.artifact_path(PREPARE_PROOF),
+    );
+    let prove_prepare_ms = start.elapsed().as_millis() as u64;
+
+    // Step 5: Reblind Prepare
+    // Load data before timing (file I/O should not be part of reblind benchmark)
+    let prepare_instance = load_instance(config.artifact_path(PREPARE_INSTANCE)).map_err(|e| {
+        ZkProofError::FileNotFound {
+            message: format!("Failed to load prepare instance: {}", e),
+        }
+    })?;
+    let prepare_witness = load_witness(config.artifact_path(PREPARE_WITNESS)).map_err(|e| {
+        ZkProofError::FileNotFound {
+            message: format!("Failed to load prepare witness: {}", e),
+        }
+    })?;
+    let shared_blinds =
+        load_shared_blinds::<E>(config.artifact_path(SHARED_BLINDS)).map_err(|e| {
+            ZkProofError::FileNotFound {
+                message: format!("Failed to load shared blinds: {}", e),
             }
         })?;
 
-        // Step 3: Generate Shared Blinds
-        let start = std::time::Instant::now();
-        gen_shared_blinds::<E>(SHARED_BLINDS, NUM_SHARED);
-        let generate_blinds_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    reblind_with_loaded_data(
+        PrepareCircuit::default(),
+        &prepare_pk,
+        prepare_instance,
+        prepare_witness,
+        &shared_blinds,
+        config.artifact_path(PREPARE_INSTANCE),
+        config.artifact_path(PREPARE_WITNESS),
+        config.artifact_path(PREPARE_PROOF),
+    );
+    let reblind_prepare_ms = start.elapsed().as_millis() as u64;
 
-        // Step 4: Prove Prepare Circuit
-        let start = std::time::Instant::now();
-        let prepare_circuit = PrepareCircuit::new(input_path.as_ref().map(PathBuf::from));
-        prove_circuit_with_pk(
-            prepare_circuit,
-            &prepare_pk,
-            PREPARE_INSTANCE,
-            PREPARE_WITNESS,
-            PREPARE_PROOF,
-        );
-        let prove_prepare_ms = start.elapsed().as_millis() as u64;
+    // Step 6: Prove Show Circuit
+    let start = std::time::Instant::now();
+    let show_circuit = ShowCircuit::new(config.clone(), input_path.as_ref().map(PathBuf::from));
+    prove_circuit_with_pk(
+        show_circuit,
+        &show_pk,
+        config.artifact_path(SHOW_INSTANCE),
+        config.artifact_path(SHOW_WITNESS),
+        config.artifact_path(SHOW_PROOF),
+    );
+    let prove_show_ms = start.elapsed().as_millis() as u64;
 
-        // Step 5: Reblind Prepare
-        // Load data before timing (file I/O should not be part of reblind benchmark)
-        let prepare_instance =
-            load_instance(PREPARE_INSTANCE).map_err(|e| ZkProofError::FileNotFound {
-                message: format!("Failed to load prepare instance: {}", e),
-            })?;
-        let prepare_witness =
-            load_witness(PREPARE_WITNESS).map_err(|e| ZkProofError::FileNotFound {
-                message: format!("Failed to load prepare witness: {}", e),
-            })?;
-        let shared_blinds =
-            load_shared_blinds::<E>(SHARED_BLINDS).map_err(|e| ZkProofError::FileNotFound {
-                message: format!("Failed to load shared blinds: {}", e),
-            })?;
-
-        let start = std::time::Instant::now();
-        reblind_with_loaded_data(
-            PrepareCircuit::default(),
-            &prepare_pk,
-            prepare_instance,
-            prepare_witness,
-            &shared_blinds,
-            PREPARE_INSTANCE,
-            PREPARE_WITNESS,
-            PREPARE_PROOF,
-        );
-        let reblind_prepare_ms = start.elapsed().as_millis() as u64;
-
-        // Step 6: Prove Show Circuit
-        let start = std::time::Instant::now();
-        let show_circuit = ShowCircuit::new(input_path.as_ref().map(PathBuf::from));
-        prove_circuit_with_pk(
-            show_circuit,
-            &show_pk,
-            SHOW_INSTANCE,
-            SHOW_WITNESS,
-            SHOW_PROOF,
-        );
-        let prove_show_ms = start.elapsed().as_millis() as u64;
-
-        // Step 7: Reblind Show
-        // Load data before timing (file I/O should not be part of reblind benchmark)
-        let show_instance =
-            load_instance(SHOW_INSTANCE).map_err(|e| ZkProofError::FileNotFound {
-                message: format!("Failed to load show instance: {}", e),
-            })?;
-        let show_witness = load_witness(SHOW_WITNESS).map_err(|e| ZkProofError::FileNotFound {
+    // Step 7: Reblind Show
+    // Load data before timing (file I/O should not be part of reblind benchmark)
+    let show_instance = load_instance(config.artifact_path(SHOW_INSTANCE)).map_err(|e| {
+        ZkProofError::FileNotFound {
+            message: format!("Failed to load show instance: {}", e),
+        }
+    })?;
+    let show_witness = load_witness(config.artifact_path(SHOW_WITNESS)).map_err(|e| {
+        ZkProofError::FileNotFound {
             message: format!("Failed to load show witness: {}", e),
-        })?;
-        // Reuse shared_blinds from Prepare step (already loaded)
+        }
+    })?;
+    // Reuse shared_blinds from Prepare step (already loaded)
 
-        let start = std::time::Instant::now();
-        reblind_with_loaded_data(
-            ShowCircuit::default(),
-            &show_pk,
-            show_instance,
-            show_witness,
-            &shared_blinds,
-            SHOW_INSTANCE,
-            SHOW_WITNESS,
-            SHOW_PROOF,
-        );
-        let reblind_show_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    reblind_with_loaded_data(
+        ShowCircuit::default(),
+        &show_pk,
+        show_instance,
+        show_witness,
+        &shared_blinds,
+        config.artifact_path(SHOW_INSTANCE),
+        config.artifact_path(SHOW_WITNESS),
+        config.artifact_path(SHOW_PROOF),
+    );
+    let reblind_show_ms = start.elapsed().as_millis() as u64;
 
-        // Step 8: Verify Prepare
-        // Load proof before timing (file I/O should not be part of verify benchmark)
-        let prepare_proof =
-            load_proof(PREPARE_PROOF).map_err(|e| ZkProofError::FileNotFound {
-                message: format!("Failed to load prepare proof: {}", e),
-            })?;
+    // Step 8: Verify Prepare
+    // Load proof before timing (file I/O should not be part of verify benchmark)
+    let prepare_proof = load_proof(config.artifact_path(PREPARE_PROOF)).map_err(|e| {
+        ZkProofError::FileNotFound {
+            message: format!("Failed to load prepare proof: {}", e),
+        }
+    })?;
 
-        let start = std::time::Instant::now();
-        verify_circuit_with_loaded_data(&prepare_proof, &prepare_vk);
-        let verify_prepare_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    verify_circuit_with_loaded_data(&prepare_proof, &prepare_vk);
+    let verify_prepare_ms = start.elapsed().as_millis() as u64;
 
-        // Step 9: Verify Show
-        // Load proof before timing (file I/O should not be part of verify benchmark)
-        let show_proof = load_proof(SHOW_PROOF).map_err(|e| ZkProofError::FileNotFound {
+    // Step 9: Verify Show
+    // Load proof before timing (file I/O should not be part of verify benchmark)
+    let show_proof =
+        load_proof(config.artifact_path(SHOW_PROOF)).map_err(|e| ZkProofError::FileNotFound {
             message: format!("Failed to load show proof: {}", e),
         })?;
 
-        let start = std::time::Instant::now();
-        verify_circuit_with_loaded_data(&show_proof, &show_vk);
-        let verify_show_ms = start.elapsed().as_millis() as u64;
+    let start = std::time::Instant::now();
+    verify_circuit_with_loaded_data(&show_proof, &show_vk);
+    let verify_show_ms = start.elapsed().as_millis() as u64;
 
-        // Measure file sizes
-        let prepare_proving_key_bytes = get_proof_size(PREPARE_PROVING_KEY)?;
-        let prepare_verifying_key_bytes = get_proof_size(PREPARE_VERIFYING_KEY)?;
-        let show_proving_key_bytes = get_proof_size(SHOW_PROVING_KEY)?;
-        let show_verifying_key_bytes = get_proof_size(SHOW_VERIFYING_KEY)?;
-        let prepare_proof_bytes = get_proof_size(PREPARE_PROOF)?;
-        let show_proof_bytes = get_proof_size(SHOW_PROOF)?;
-        let prepare_witness_bytes = get_proof_size(PREPARE_WITNESS)?;
-        let show_witness_bytes = get_proof_size(SHOW_WITNESS)?;
+    // Measure file sizes
+    let prepare_proving_key_bytes = get_proof_size(&config.key_path(PREPARE_PROVING_KEY))?;
+    let prepare_verifying_key_bytes = get_proof_size(&config.key_path(PREPARE_VERIFYING_KEY))?;
+    let show_proving_key_bytes = get_proof_size(&config.key_path(SHOW_PROVING_KEY))?;
+    let show_verifying_key_bytes = get_proof_size(&config.key_path(SHOW_VERIFYING_KEY))?;
+    let prepare_proof_bytes = get_proof_size(&config.artifact_path(PREPARE_PROOF))?;
+    let show_proof_bytes = get_proof_size(&config.artifact_path(SHOW_PROOF))?;
+    let prepare_witness_bytes = get_proof_size(&config.artifact_path(PREPARE_WITNESS))?;
+    let show_witness_bytes = get_proof_size(&config.artifact_path(SHOW_WITNESS))?;
 
-        Ok(BenchmarkResults {
-            prepare_setup_ms,
-            show_setup_ms,
-            generate_blinds_ms,
-            prove_prepare_ms,
-            reblind_prepare_ms,
-            prove_show_ms,
-            reblind_show_ms,
-            verify_prepare_ms,
-            verify_show_ms,
-            prepare_proving_key_bytes,
-            prepare_verifying_key_bytes,
-            show_proving_key_bytes,
-            show_verifying_key_bytes,
-            prepare_proof_bytes,
-            show_proof_bytes,
-            prepare_witness_bytes,
-            show_witness_bytes,
-        })
+    Ok(BenchmarkResults {
+        prepare_setup_ms,
+        show_setup_ms,
+        generate_blinds_ms,
+        prove_prepare_ms,
+        reblind_prepare_ms,
+        prove_show_ms,
+        reblind_show_ms,
+        verify_prepare_ms,
+        verify_show_ms,
+        prepare_proving_key_bytes,
+        prepare_verifying_key_bytes,
+        show_proving_key_bytes,
+        show_verifying_key_bytes,
+        prepare_proof_bytes,
+        show_proof_bytes,
+        prepare_witness_bytes,
+        show_witness_bytes,
     })
 }
 
@@ -554,22 +560,21 @@ pub fn get_comm_w_shared(
     documents_path: String,
     circuit_type: String,
 ) -> Result<String, ZkProofError> {
-    with_working_dir(&documents_path, || {
-        let instance_path = match circuit_type.as_str() {
-            "prepare" => PREPARE_INSTANCE,
-            "show" => SHOW_INSTANCE,
-            _ => {
-                return Err(ZkProofError::InvalidInput {
-                    message: format!(
-                        "Invalid circuit_type '{}'. Must be 'prepare' or 'show'",
-                        circuit_type
-                    ),
-                })
-            }
-        };
+    let config = make_config(&documents_path);
+    let instance_path = match circuit_type.as_str() {
+        "prepare" => config.artifact_path(PREPARE_INSTANCE),
+        "show" => config.artifact_path(SHOW_INSTANCE),
+        _ => {
+            return Err(ZkProofError::InvalidInput {
+                message: format!(
+                    "Invalid circuit_type '{}'. Must be 'prepare' or 'show'",
+                    circuit_type
+                ),
+            })
+        }
+    };
 
-        extract_comm_w_shared(instance_path)
-    })
+    extract_comm_w_shared(&instance_path)
 }
 
 // ============================================================================
@@ -577,11 +582,16 @@ pub fn get_comm_w_shared(
 // ============================================================================
 
 /// Extract comm_W_shared from a saved instance file
-fn extract_comm_w_shared(instance_path: &str) -> Result<String, ZkProofError> {
-    use ecdsa_spartan2::setup::load_instance;
-
+fn extract_comm_w_shared(
+    instance_path: impl AsRef<std::path::Path>,
+) -> Result<String, ZkProofError> {
+    let instance_path = instance_path.as_ref();
     let instance = load_instance(instance_path).map_err(|e| ZkProofError::FileNotFound {
-        message: format!("Failed to load instance from '{}': {}", instance_path, e),
+        message: format!(
+            "Failed to load instance from '{}': {}",
+            instance_path.display(),
+            e
+        ),
     })?;
 
     // Convert comm_W_shared to hex string
@@ -590,9 +600,14 @@ fn extract_comm_w_shared(instance_path: &str) -> Result<String, ZkProofError> {
 }
 
 /// Get the size of a proof file in bytes
-fn get_proof_size(proof_path: &str) -> Result<u64, ZkProofError> {
+fn get_proof_size(proof_path: impl AsRef<std::path::Path>) -> Result<u64, ZkProofError> {
+    let proof_path = proof_path.as_ref();
     let metadata = std::fs::metadata(proof_path).map_err(|e| ZkProofError::FileNotFound {
-        message: format!("Failed to get proof size from '{}': {}", proof_path, e),
+        message: format!(
+            "Failed to get proof size from '{}': {}",
+            proof_path.display(),
+            e
+        ),
     })?;
 
     Ok(metadata.len())
@@ -616,27 +631,22 @@ pub fn mopro_hello_world() -> String {
 mod tests {
     use super::*;
 
-    use std::path::Path;
-
     #[test]
     fn test_mopro_hello_world() {
         assert_eq!(mopro_hello_world(), "Hello, World!");
     }
 
     #[test]
-    fn test_with_working_dir_error_handling() {
-        let original_dir = std::env::current_dir().unwrap();
-
-        // Test with nonexistent path - should return error and restore directory
-        let result = with_working_dir("/nonexistent/test/path", || {
-            Ok::<_, ZkProofError>("should not reach here".to_string())
-        });
-
-        assert!(result.is_err());
-
-        // Verify directory was restored
-        let after_dir = std::env::current_dir().unwrap();
-        assert_eq!(original_dir, after_dir);
+    fn test_path_config_mobile() {
+        let config = make_config("/app/Documents");
+        assert_eq!(
+            config.key_path(PREPARE_PROVING_KEY),
+            PathBuf::from("/app/Documents/keys/prepare_proving.key")
+        );
+        assert_eq!(
+            config.artifact_path(PREPARE_PROOF),
+            PathBuf::from("/app/Documents/keys/prepare_proof.bin")
+        );
     }
 
     #[test]
