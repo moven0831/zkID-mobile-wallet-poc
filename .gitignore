@@ -1,8 +1,5 @@
 target/
 build/
 
-MoproiOSBindings/
-MoproAndroidBindings/
-mopro_flutter_bindings/
 Config.toml
 CLAUDE.md
