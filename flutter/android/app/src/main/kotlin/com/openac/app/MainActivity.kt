@@ -1,4 +1,4 @@
-package com.zkid.app
+package com.openac.app
 
 import io.flutter.embedding.android.FlutterActivity
 
