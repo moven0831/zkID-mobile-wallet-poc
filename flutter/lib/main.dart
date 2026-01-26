@@ -383,7 +383,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('zkID E2E Proof Workflow'),
+        title: const Text('OpenAC E2E Proof Workflow'),
         actions: [
           if (_results.isNotEmpty && !_isOperating)
             IconButton(

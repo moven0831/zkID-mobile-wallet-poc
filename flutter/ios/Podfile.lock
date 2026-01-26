@@ -27,9 +27,9 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
-  mopro_flutter_bindings: ea1507b3c65d4d6bccf59d1ecf404b09803cf2d4
+  mopro_flutter_bindings: 8f83966b4d7fea00976d376d012addf968f3c469
   path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
 
-PODFILE CHECKSUM: 4f1c12611da7338d21589c0b2ecd6bd20b109694
+PODFILE CHECKSUM: e21a66e24e78eeb752b2a94481de1c244c558500
 
 COCOAPODS: 1.16.2

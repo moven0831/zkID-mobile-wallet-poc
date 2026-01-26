@@ -10,9 +10,32 @@ Mobile App for [zkID Wallet-Unit-PoC](https://github.com/privacy-ethereum/zkID/t
 cargo install mopro-cli
 ```
 
-### 2. iOS Projects
+### 2. Android Configuration (Android targets only)
 
-### 2(a). Generate iOS Bindings
+Before building for Android, configure the Android NDK environment variables. The Rust FFI bindings require NDK for cross-compilation.
+
+1. Install NDK via Android Studio: `SDK Manager > SDK Tools > NDK (Side by Side)`
+
+2. Set environment variables in your shell config (`~/.zshrc` or `~/.bashrc`):
+
+    ```bash
+    # Android SDK
+    export ANDROID_HOME="$HOME/Library/Android/sdk"
+
+    # Find your NDK version
+    ls $ANDROID_HOME/ndk  # e.g., 26.1.10909125
+
+    # Set NDK path (replace version with yours)
+    export NDK_PATH="$ANDROID_HOME/ndk/26.1.10909125"
+    ```
+
+3. Reload your shell or run `source ~/.zshrc`
+
+> For more details, see [Mopro Prerequisites - Android Configuration](https://zkmopro.org/docs/prerequisites#android-configuration)
+
+### 3. iOS Projects
+
+### 3(a). Generate iOS Bindings
 
 Build bindings for your project by executing:
 
@@ -21,21 +44,21 @@ Build bindings for your project by executing:
 mopro build
 ```
 
-### 2(b). Update Bindings to iOS project
+### 3(b). Update Bindings to iOS project
 
 ```sh
 mopro update
 ```
 
-### 2(c). Open iOS project
+### 3(c). Open iOS project
 
 ```sh
 open ios/MoproApp.xcodeproj
 ```
 
-## 3. Flutter App
+## 4. Flutter App
 
-### 3(a). Generate Flutter Bindings
+### 4(a). Generate Flutter Bindings
 
 Build bindings for your project by executing:
 
@@ -44,7 +67,7 @@ Build bindings for your project by executing:
 mopro build
 ```
 
-### 3(b). Exclude x86_64 iOS simulator in `mopro_flutter_bindings/ios/mopro_flutter_bindings.podspec`
+### 4(b). Exclude x86_64 iOS simulator in `mopro_flutter_bindings/ios/mopro_flutter_bindings.podspec`
 
 ```podspec
 # Flutter.framework does not contain a i386 slice.
@@ -52,7 +75,7 @@ mopro build
 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 x86_64',
 ```
 
-### 3(c). Connect Devices or Run Emulators
+### 4(c). Connect Devices or Run Emulators
 
 ```sh
 # Check Available Devices
@@ -62,7 +85,7 @@ flutter devices
 flutter emulator --launch <EMULATOR_TYPE>
 ```
 
-### 3(d). Run Flutter with Release Mode
+### 4(d). Run Flutter with Release Mode
 
 ```sh
 cd flutter
