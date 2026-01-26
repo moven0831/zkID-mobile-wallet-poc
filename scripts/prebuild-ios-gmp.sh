@@ -1,60 +1,82 @@
 #!/bin/bash
 set -e
 
-# Pre-build GMP for iOS to avoid Xcode environment issues
-# This script ensures GMP is built in a clean terminal environment
-# before Xcode attempts to build the Rust crate
+# GMP prebuild for iOS - ensures GMP is built in a clean environment
+# This script is idempotent: skips if GMP is already cached
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Cache location
+CACHE_DIR="$PROJECT_ROOT/.build-cache"
+WITNESSCALC_DIR="$CACHE_DIR/witnesscalc"
+GMP_DIR="$WITNESSCALC_DIR/depends/gmp"
+
+# Determine target package based on platform
+case "$PLATFORM_NAME" in
+    iphonesimulator)
+        GMP_TARGET="ios_simulator"
+        GMP_PACKAGE="package_iphone_simulator_arm64"
+        ;;
+    *)
+        GMP_TARGET="ios"
+        GMP_PACKAGE="package_ios_arm64"
+        ;;
+esac
+
+GMP_PACKAGE_DIR="$GMP_DIR/$GMP_PACKAGE"
+
+# Check if already built (idempotent)
+if [ -d "$GMP_PACKAGE_DIR" ] && [ -f "$GMP_PACKAGE_DIR/lib/libgmp.a" ]; then
+    echo "GMP $GMP_TARGET already cached at: $GMP_PACKAGE_DIR"
+    exit 0
+fi
 
 echo "=================================================="
-echo "Pre-building GMP for iOS..."
+echo "Building GMP for $GMP_TARGET..."
 echo "=================================================="
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ECDSA_DIR="$PROJECT_ROOT/wallet-unit-poc/ecdsa-spartan2"
+# Clone witnesscalc if needed
+if [ ! -d "$WITNESSCALC_DIR" ]; then
+    echo "Cloning witnesscalc repository..."
+    mkdir -p "$CACHE_DIR"
+    git clone --depth 1 -b secq256r1-support \
+        https://github.com/zkmopro/witnesscalc.git "$WITNESSCALC_DIR"
+    cd "$WITNESSCALC_DIR"
+    # Initialize submodules (nlohmann/json at depends/json)
+    git submodule update --init --recursive
+    # Fetch secq256r1-support-v2.2.0 branch (needed for v2.2.0 circuits)
+    git remote set-branches --add origin secq256r1-support-v2.2.0
+    git fetch --depth 1 origin secq256r1-support-v2.2.0
+    cd - > /dev/null
+fi
 
-cd "$ECDSA_DIR"
+cd "$WITNESSCALC_DIR"
 
-# Build for iOS arm64 (actual device)
-echo "Building for aarch64-apple-ios (iOS device)..."
-export IPHONEOS_DEPLOYMENT_TARGET=13.0
-cargo build --target aarch64-apple-ios --release 2>&1 | grep -E "(Compiling ecdsa-spartan2|Finished)" || true
+# Ensure clean environment for GMP configure
+# CRITICAL: Unset variables that cause native compilers to target iOS
+unset SDKROOT
+unset DEVELOPER_DIR
+unset IPHONEOS_DEPLOYMENT_TARGET
+unset MACOSX_DEPLOYMENT_TARGET
 
-# Find the successful build directory
-TERMINAL_BUILD=$(find "$ECDSA_DIR/target/aarch64-apple-ios/release/build" -name "ecdsa-spartan2-*" -type d | head -1)
+# CRITICAL: Set CC_FOR_BUILD for cross-compilation
+# GMP's configure needs a native macOS compiler to build helper tools that run
+# during the build process. Without this, it tries to use the iOS cross-compiler
+# (with SDK flags) for native code, which fails.
+# Note: build_gmp.sh sets iOS min version via CFLAGS (-mios-simulator-version-min=8.0)
+export CC_FOR_BUILD="/usr/bin/clang"
+export CPP_FOR_BUILD="/usr/bin/clang -E"
 
-if [ -z "$TERMINAL_BUILD" ]; then
-    echo "ERROR: Could not find terminal build directory"
+# Build GMP
+./build_gmp.sh "$GMP_TARGET"
+
+# Verify
+if [ ! -f "$GMP_PACKAGE_DIR/lib/libgmp.a" ]; then
+    echo "ERROR: GMP build failed"
     exit 1
 fi
 
-echo "✓ GMP built successfully in terminal environment"
-echo "Terminal build: $TERMINAL_BUILD"
-
-# Find Xcode derived data build directories and copy pre-built GMP
-echo ""
-echo "Copying pre-built GMP to Xcode build directories..."
-
-XCODE_BUILDS=$(find ~/Library/Developer/Xcode/DerivedData/Runner-*/Build/Intermediates.noindex/Pods.build/Release-iphoneos/mopro_flutter_bindings.build/aarch64-apple-ios/release/build/ -name "ecdsa-spartan2-*" -type d 2>/dev/null || true)
-
-if [ -z "$XCODE_BUILDS" ]; then
-    echo "ℹ No Xcode build directories found (this is normal before first build)"
-else
-    for XCODE_BUILD in $XCODE_BUILDS; do
-        echo "  Copying to: $XCODE_BUILD"
-        mkdir -p "$XCODE_BUILD/out/witnesscalc/depends/gmp/"
-
-        if [ -d "$TERMINAL_BUILD/out/witnesscalc/depends/gmp/package_ios_arm64" ]; then
-            cp -r "$TERMINAL_BUILD/out/witnesscalc/depends/gmp/package_ios_arm64" \
-                  "$XCODE_BUILD/out/witnesscalc/depends/gmp/"
-            echo "  ✓ Copied GMP to Xcode build"
-        fi
-    done
-fi
-
-echo ""
 echo "=================================================="
-echo "✓ Pre-build complete!"
+echo "GMP prebuild complete: $GMP_PACKAGE_DIR"
 echo "=================================================="
-echo ""
-echo "You can now run: flutter run --release"
-echo "Or: flutter build ios --release"

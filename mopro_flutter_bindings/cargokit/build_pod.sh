@@ -11,6 +11,32 @@ NEW_PATH=`echo $PATH | tr ":" "\n" | grep -v "Contents/Developer/" | tr "\n" ":"
 
 export PATH=${NEW_PATH%?} # remove trailing :
 
+# === GMP PREBUILD FOR iOS ===
+if [ "$PLATFORM_NAME" = "iphoneos" ] || [ "$PLATFORM_NAME" = "iphonesimulator" ]; then
+    # SRCROOT points to flutter/ios/Pods, so go up THREE levels to get project root
+    # (PODS_TARGET_SRCROOT points to symlinked path which doesn't work)
+    GMP_PROJECT_ROOT="$(cd "$SRCROOT/../../.." && pwd)"
+    GMP_PREBUILD_SCRIPT="$GMP_PROJECT_ROOT/scripts/prebuild-ios-gmp.sh"
+
+    if [ -f "$GMP_PREBUILD_SCRIPT" ]; then
+        echo "=== GMP Prebuild: Checking cache ==="
+        echo "=== Project root: $GMP_PROJECT_ROOT ==="
+        # Run prebuild in clean environment to avoid SDKROOT pollution
+        env -i \
+            HOME="$HOME" \
+            PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin" \
+            IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-13.0}" \
+            PLATFORM_NAME="$PLATFORM_NAME" \
+            sh "$GMP_PREBUILD_SCRIPT"
+    else
+        echo "=== GMP Prebuild: Script not found at $GMP_PREBUILD_SCRIPT ==="
+    fi
+
+    # Export cache location for build.rs to use (entire witnesscalc directory)
+    export WITNESSCALC_PREBUILD_CACHE="$GMP_PROJECT_ROOT/.build-cache/witnesscalc"
+fi
+# === END GMP PREBUILD ===
+
 env
 
 # Platform name (macosx, iphoneos, iphonesimulator)

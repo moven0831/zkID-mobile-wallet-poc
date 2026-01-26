@@ -3,3 +3,6 @@ build/
 
 Config.toml
 CLAUDE.md
+
+# GMP build cache
+.build-cache/
