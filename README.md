@@ -1,5 +1,8 @@
 # zkID Mobile Wallet-Unit-PoC 
 
+> [!WARNING]
+> This repo is deprecated. The mobile app for OpenAC has been migrated to https://github.com/privacy-ethereum/zkID
+
 Mobile App for [zkID Wallet-Unit-PoC](https://github.com/privacy-ethereum/zkID/tree/main/wallet-unit-poc), support both Android and iOS.
 
 ## Getting Started
